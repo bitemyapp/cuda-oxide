@@ -172,6 +172,7 @@ pub fn cuda_module(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 struct CudaModuleKernel {
+    module_path: Vec<Ident>,
     vis: syn::Visibility,
     cfg_attrs: Vec<syn::Attribute>,
     method_attrs: Vec<syn::Attribute>,
@@ -228,7 +229,7 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
     let function_initializers = non_generic_kernels.map(|kernel| {
         let cfg_attrs = &kernel.cfg_attrs;
         let field = cuda_module_function_field(&kernel.fn_name);
-        let marker = cuda_kernel_marker_name(&kernel.fn_name);
+        let marker = cuda_module_kernel_marker_path(kernel);
         quote! {
             #(#cfg_attrs)*
             #field: module.load_function(<#marker as ::cuda_host::CudaKernel>::PTX_NAME)?,
@@ -325,34 +326,121 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
 
 fn collect_cuda_module_kernels(items: &[Item]) -> syn::Result<Vec<CudaModuleKernel>> {
     let mut kernels = Vec::new();
-    for item in items {
-        let Item::Fn(item_fn) = item else {
-            continue;
-        };
-        if !has_attr_named(&item_fn.attrs, "kernel") {
-            continue;
-        }
-        let cluster_dim = cuda_module_cluster_dim(&item_fn.attrs)?;
-        let params = cuda_module_params(item_fn)?;
-        let is_generic = item_fn
-            .sig
-            .generics
-            .params
-            .iter()
-            .any(|param| matches!(param, GenericParam::Type(_)));
-        kernels.push(CudaModuleKernel {
-            vis: item_fn.vis.clone(),
-            cfg_attrs: cuda_module_cfg_attrs(&item_fn.attrs),
-            method_attrs: cuda_module_method_attrs(&item_fn.attrs),
-            unsafety: item_fn.sig.unsafety,
-            fn_name: item_fn.sig.ident.clone(),
-            generics: item_fn.sig.generics.clone(),
-            params,
-            cluster_dim,
-            is_generic,
-        });
-    }
+    collect_cuda_module_kernels_in(items, &mut Vec::new(), &mut kernels)?;
     Ok(kernels)
+}
+
+fn collect_cuda_module_kernels_in(
+    items: &[Item],
+    module_path: &mut Vec<Ident>,
+    kernels: &mut Vec<CudaModuleKernel>,
+) -> syn::Result<()> {
+    for item in items {
+        match item {
+            Item::Fn(item_fn) => {
+                if !has_attr_named(&item_fn.attrs, "kernel") {
+                    continue;
+                }
+                let cluster_dim = cuda_module_cluster_dim(&item_fn.attrs)?;
+                let params = cuda_module_params(item_fn)?;
+                let is_generic = item_fn
+                    .sig
+                    .generics
+                    .params
+                    .iter()
+                    .any(|param| matches!(param, GenericParam::Type(_)));
+                kernels.push(CudaModuleKernel {
+                    module_path: module_path.clone(),
+                    vis: item_fn.vis.clone(),
+                    cfg_attrs: cuda_module_cfg_attrs(&item_fn.attrs),
+                    method_attrs: cuda_module_method_attrs(&item_fn.attrs),
+                    unsafety: item_fn.sig.unsafety,
+                    fn_name: item_fn.sig.ident.clone(),
+                    generics: item_fn.sig.generics.clone(),
+                    params,
+                    cluster_dim,
+                    is_generic,
+                });
+            }
+            Item::Mod(item_mod) => {
+                module_path.push(item_mod.ident.clone());
+                if let Some((_brace, nested_items)) = &item_mod.content {
+                    collect_cuda_module_kernels_in(nested_items, module_path, kernels)?;
+                } else if let Some(nested_items) = read_cuda_module_file_items(item_mod)? {
+                    collect_cuda_module_kernels_in(&nested_items, module_path, kernels)?;
+                }
+                module_path.pop();
+            }
+            Item::Macro(item_macro) => {
+                if let Some(nested_items) = read_cuda_module_include_items(item_macro)? {
+                    collect_cuda_module_kernels_in(&nested_items, module_path, kernels)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn read_cuda_module_file_items(item_mod: &syn::ItemMod) -> syn::Result<Option<Vec<Item>>> {
+    let Some(path) = cuda_module_file_path(item_mod)? else {
+        return Ok(None);
+    };
+    read_cuda_module_items(&path, item_mod)
+}
+
+fn read_cuda_module_include_items(item_macro: &syn::ItemMacro) -> syn::Result<Option<Vec<Item>>> {
+    if !item_macro.mac.path.is_ident("include") {
+        return Ok(None);
+    }
+    let Ok(relative) = item_macro.mac.parse_body::<syn::LitStr>() else {
+        return Ok(None);
+    };
+    let Some(path) = cuda_module_relative_path(std::path::PathBuf::from(relative.value())) else {
+        return Ok(None);
+    };
+    read_cuda_module_items(&path, item_macro)
+}
+
+fn read_cuda_module_items(
+    path: &std::path::Path,
+    span: &impl quote::ToTokens,
+) -> syn::Result<Option<Vec<Item>>> {
+    let source = std::fs::read_to_string(path).map_err(|error| {
+        syn::Error::new_spanned(
+            span,
+            format!("failed to read cuda_module nested module {}: {error}", path.display()),
+        )
+    })?;
+    let file = syn::parse_file(&source).map_err(|error| {
+        syn::Error::new_spanned(
+            span,
+            format!("failed to parse cuda_module nested module {}: {error}", path.display()),
+        )
+    })?;
+    Ok(Some(file.items))
+}
+
+fn cuda_module_file_path(item_mod: &syn::ItemMod) -> syn::Result<Option<std::path::PathBuf>> {
+    let path_attr = item_mod.attrs.iter().find(|attr| attr.path().is_ident("path"));
+    let relative = match path_attr {
+        Some(attr) => attr.parse_args::<syn::LitStr>()?.value(),
+        None => format!("{}.rs", item_mod.ident),
+    };
+    Ok(cuda_module_relative_path(std::path::PathBuf::from(relative)))
+}
+
+fn cuda_module_relative_path(relative: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    if relative.is_absolute() {
+        return Some(relative);
+    }
+    let manifest_dir = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?);
+    let candidates = [
+        manifest_dir.join("src").join(&relative),
+        manifest_dir.join("src/gpu").join(&relative),
+        manifest_dir.join(&relative),
+    ];
+    candidates.into_iter().find(|path| path.exists())
 }
 
 fn cuda_module_method_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
@@ -836,10 +924,9 @@ fn cuda_module_async_arg_marshalling(param: &CudaModuleParam) -> TokenStream2 {
 
 fn cuda_module_function_binding(kernel: &CudaModuleKernel) -> TokenStream2 {
     if kernel.is_generic {
-        let fn_name = &kernel.fn_name;
-        let marker = cuda_kernel_marker_name(fn_name);
+        let marker = cuda_module_kernel_marker_path(kernel);
         let type_params = cuda_module_type_param_names(&kernel.generics);
-        let kernel_entry = format_ident!("{}", kernel_symbol(&fn_name.to_string()));
+        let kernel_entry = cuda_module_kernel_entry_path(kernel);
         let turbofish = if type_params.is_empty() {
             quote! {}
         } else {
@@ -934,6 +1021,18 @@ fn cuda_module_function_field(fn_name: &Ident) -> Ident {
 
 fn cuda_kernel_marker_name(fn_name: &Ident) -> Ident {
     format_ident!("__{}_CudaKernel", fn_name)
+}
+
+fn cuda_module_kernel_marker_path(kernel: &CudaModuleKernel) -> TokenStream2 {
+    let path = &kernel.module_path;
+    let marker = cuda_kernel_marker_name(&kernel.fn_name);
+    quote! { #(#path::)* #marker }
+}
+
+fn cuda_module_kernel_entry_path(kernel: &CudaModuleKernel) -> TokenStream2 {
+    let path = &kernel.module_path;
+    let entry = format_ident!("{}", kernel_symbol(&kernel.fn_name.to_string()));
+    quote! { #(#path::)* #entry }
 }
 
 /// Marks a function as a CUDA kernel.
