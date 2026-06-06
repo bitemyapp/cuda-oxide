@@ -710,7 +710,16 @@ fn write_device_artifact_object(
     artifact: &device_codegen::DeviceCodegenArtifact,
     functions: &[collector::CollectedFunction<'_>],
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let materialized_artifact;
     let bundle_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| output_name.to_string());
+    let artifact = match materialize_artifact_for_embedding(&bundle_name, &result.target, artifact)?
+    {
+        Some(cubin) => {
+            materialized_artifact = cubin;
+            &materialized_artifact
+        }
+        None => artifact,
+    };
     let payload_kind = match artifact.kind {
         device_codegen::DeviceCodegenArtifactKind::Ptx => oxide_artifacts::ArtifactPayloadKind::Ptx,
         device_codegen::DeviceCodegenArtifactKind::NvvmIr => {
@@ -742,7 +751,12 @@ fn write_device_artifact_object(
     }
 
     let blob = oxide_artifacts::build_artifact_blob(&spec)?;
-    let object = oxide_artifacts::build_host_object_for_target(&blob, host_target)?;
+    let anchor_symbol = oxide_artifacts::artifact_anchor_symbol_name(&bundle_name);
+    let object = oxide_artifacts::build_host_object_for_target_with_anchor(
+        &blob,
+        host_target,
+        Some(&anchor_symbol),
+    )?;
     let safe_output_name = sanitize_path_component(output_name);
     let artifact_id = ARTIFACT_OBJECT_COUNTER.fetch_add(1, Ordering::Relaxed);
     let object_dir = output_dir
@@ -756,6 +770,35 @@ fn write_device_artifact_object(
     ));
     std::fs::write(&object_path, object)?;
     Ok(object_path)
+}
+
+fn materialize_artifact_for_embedding(
+    bundle_name: &str,
+    target: &str,
+    artifact: &device_codegen::DeviceCodegenArtifact,
+) -> Result<Option<device_codegen::DeviceCodegenArtifact>, Box<dyn std::error::Error>> {
+    match artifact.kind {
+        device_codegen::DeviceCodegenArtifactKind::NvvmIr => {
+            let cubin =
+                cuda_host::ltoir::build_cubin_from_nvvm_ir(&artifact.bytes, bundle_name, target)?;
+            Ok(Some(device_codegen::DeviceCodegenArtifact {
+                kind: device_codegen::DeviceCodegenArtifactKind::Cubin,
+                name: format!("{bundle_name}.cubin"),
+                bytes: cubin,
+            }))
+        }
+        device_codegen::DeviceCodegenArtifactKind::Ltoir => {
+            let cubin =
+                cuda_host::ltoir::link_ltoir_to_cubin(&artifact.bytes, &artifact.name, target)?;
+            Ok(Some(device_codegen::DeviceCodegenArtifact {
+                kind: device_codegen::DeviceCodegenArtifactKind::Cubin,
+                name: format!("{bundle_name}.cubin"),
+                bytes: cubin,
+            }))
+        }
+        device_codegen::DeviceCodegenArtifactKind::Ptx
+        | device_codegen::DeviceCodegenArtifactKind::Cubin => Ok(None),
+    }
 }
 
 fn sanitize_path_component(name: &str) -> String {

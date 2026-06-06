@@ -24,6 +24,7 @@ dialect-mir = { path = "../dialect-mir" }
 dialect-nvvm = { path = "../dialect-nvvm" }
 reserved-oxide-symbols = { path = "../reserved-oxide-symbols" }
 oxide-artifacts = { path = "../oxide-artifacts", features = ["object-write"] }
+cuda-host = { path = "../cuda-host" }
 
 # IMPORTANT: This crate is isolated from the main workspace, so we cannot use
 # `{ workspace = true }`. Keep these versions synchronized with root Cargo.toml

@@ -19,6 +19,21 @@ const HEADER_BYTES: usize = 32;
 const PAYLOAD_RECORD_BYTES: usize = 24;
 const ENTRY_RECORD_BYTES: usize = 24;
 
+const ARTIFACT_ANCHOR_PREFIX: &str = "__cuda_oxide_artifact_anchor_";
+
+pub fn artifact_anchor_symbol_name(bundle_name: &str) -> String {
+    let mut symbol = String::with_capacity(ARTIFACT_ANCHOR_PREFIX.len() + bundle_name.len());
+    symbol.push_str(ARTIFACT_ANCHOR_PREFIX);
+    for byte in bundle_name.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            symbol.push(byte as char);
+        } else {
+            symbol.push('_');
+        }
+    }
+    symbol
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ArtifactPayloadKind {
     Ptx,
@@ -516,8 +531,17 @@ pub fn build_host_object_for_target(
     section_data: &[u8],
     target: &str,
 ) -> Result<Vec<u8>, ArtifactError> {
-    use object::write::Object;
-    use object::{SectionFlags, SectionKind};
+    build_host_object_for_target_with_anchor(section_data, target, None)
+}
+
+#[cfg(feature = "object-write")]
+pub fn build_host_object_for_target_with_anchor(
+    section_data: &[u8],
+    target: &str,
+    anchor_symbol: Option<&str>,
+) -> Result<Vec<u8>, ArtifactError> {
+    use object::write::{Object, Symbol, SymbolSection};
+    use object::{SectionFlags, SectionKind, SymbolFlags, SymbolKind, SymbolScope};
 
     if section_data.is_empty() {
         return Err(ArtifactError::EmptyPayload);
@@ -535,6 +559,19 @@ pub fn build_host_object_for_target(
     section.flags = SectionFlags::Elf {
         sh_flags: elf::SHF_ALLOC | elf::SHF_GNU_RETAIN,
     };
+
+    if let Some(anchor_symbol) = anchor_symbol {
+        object.add_symbol(Symbol {
+            name: anchor_symbol.as_bytes().to_vec(),
+            value: 0,
+            size: 1,
+            kind: SymbolKind::Data,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(section_id),
+            flags: SymbolFlags::None,
+        });
+    }
 
     object
         .write()

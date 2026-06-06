@@ -236,6 +236,32 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
         }
     });
 
+    let bundle_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| module.ident.to_string());
+    let anchor_link_name = oxide_artifacts::artifact_anchor_symbol_name(&bundle_name);
+    let artifact_anchor_items = quote! {
+        #[allow(unexpected_cfgs)]
+        #[cfg(cuda_oxide_embed)]
+        unsafe extern "C" {
+            #[link_name = #anchor_link_name]
+            static __CUDA_OXIDE_ARTIFACT_ANCHOR: u8;
+        }
+
+        #[allow(unexpected_cfgs)]
+        #[cfg(cuda_oxide_embed)]
+        #[inline(never)]
+        fn __cuda_oxide_force_link_artifact() {
+            unsafe {
+                let __anchor = ::core::ptr::addr_of!(__CUDA_OXIDE_ARTIFACT_ANCHOR);
+                ::core::ptr::read_volatile(__anchor);
+            }
+        }
+
+        #[allow(unexpected_cfgs)]
+        #[cfg(not(cuda_oxide_embed))]
+        #[inline(always)]
+        fn __cuda_oxide_force_link_artifact() {}
+    };
+
     let launch_methods = kernels.iter().map(generate_cuda_module_launch_method);
     let async_module_items = if cfg!(feature = "async") {
         quote! {
@@ -270,8 +296,11 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         #(#module_attrs)*
+        #[allow(unexpected_cfgs)]
         #vis mod #ident {
             #(#items)*
+
+            #artifact_anchor_items
 
             #[derive(Clone, Debug)]
             pub struct LoadedModule {
@@ -294,6 +323,7 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
                 ctx: &::std::sync::Arc<::cuda_core::CudaContext>,
                 name: &str,
             ) -> ::core::result::Result<LoadedModule, ::cuda_host::EmbeddedModuleError> {
+                __cuda_oxide_force_link_artifact();
                 let module = ::cuda_host::load_embedded_module(ctx, name)?;
                 from_module(module).map_err(::cuda_host::EmbeddedModuleError::Driver)
             }
