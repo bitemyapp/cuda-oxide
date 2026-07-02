@@ -458,4 +458,28 @@ impl CudaFunction {
     pub unsafe fn cu_function(&self) -> cuda_bindings::CUfunction {
         self.cu_function
     }
+
+    /// Sets a mutable function attribute via `cuFuncSetAttribute`.
+    ///
+    /// `CUfunction` handles are per-module singletons, so the attribute
+    /// persists for every subsequent launch of this kernel from the same
+    /// module, including launches made through other `CudaFunction` clones.
+    pub fn set_attribute(
+        &self,
+        attribute: cuda_bindings::CUfunction_attribute,
+        value: i32,
+    ) -> Result<(), DriverError> {
+        self.module.ctx.bind_to_thread()?;
+        unsafe { cuda_bindings::cuFuncSetAttribute(self.cu_function, attribute, value).result() }
+    }
+
+    /// Sets the preferred shared-memory carveout for this kernel, in percent
+    /// of the unified L1/shared SRAM (0 = maximize L1, 100 = maximize shared).
+    /// This is a hint; the driver may pick a different split.
+    pub fn set_preferred_shared_memory_carveout(&self, percent: i32) -> Result<(), DriverError> {
+        self.set_attribute(
+            cuda_bindings::CUfunction_attribute_enum_CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+            percent,
+        )
+    }
 }
