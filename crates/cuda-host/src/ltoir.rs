@@ -191,6 +191,12 @@ pub fn build_cubin_from_nvvm_ir(
 }
 
 /// Link a single LTOIR payload to a loadable cubin image in memory.
+///
+/// `CUDA_OXIDE_MAXRREGCOUNT=N` adds `-maxrregcount=N` to nvJitLink. On pre-Blackwell targets
+/// (sm_89 / Ada) ptxas otherwise allocates the L1-latency-bound constraint walker at ~56
+/// registers / high occupancy; raising the ceiling pushes it toward the 128-register / low-
+/// occupancy regime that wins on Blackwell (more registers = less local-memory traffic + a
+/// bigger per-warp L1 slice). A/B knob; unset leaves ptxas's default allocation.
 pub fn link_ltoir_to_cubin(
     ltoir: &[u8],
     module_name: &str,
@@ -198,7 +204,12 @@ pub fn link_ltoir_to_cubin(
 ) -> Result<Vec<u8>, LtoirError> {
     let nvj = LibNvJitLink::load()?;
     let arch_opt = format!("-arch={arch}");
-    let mut linker = Linker::new(&nvj, &[&arch_opt, "-lto"])?;
+    let mut opts: Vec<String> = vec![arch_opt, "-lto".to_string()];
+    if let Some(n) = std::env::var_os("CUDA_OXIDE_MAXRREGCOUNT") {
+        opts.push(format!("-maxrregcount={}", n.to_string_lossy().trim()));
+    }
+    let opt_refs: Vec<&str> = opts.iter().map(String::as_str).collect();
+    let mut linker = Linker::new(&nvj, &opt_refs)?;
     linker.add(InputType::Ltoir, ltoir, module_name)?;
     Ok(linker.finish()?)
 }
