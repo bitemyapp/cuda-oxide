@@ -43,6 +43,18 @@ use super::{
 
 impl<'a> ModuleExportState<'a> {
     /// Export a global variable (typically shared memory for GPU kernels).
+    /// Typed-pointer mode: record a global's element type (rendered) and address space so its
+    /// `AddressOf` uses can be emitted as `i8*` bitcast constexprs. See `export_module`.
+    pub(super) fn record_global_type(&mut self, global: &ops::GlobalOp) -> Result<(), String> {
+        let name = global.get_symbol_name(self.ctx).to_string();
+        let ty = global.get_type(self.ctx);
+        let address_space = global.get_address_space(self.ctx);
+        let mut elem = String::new();
+        self.export_type(ty, &mut elem)?;
+        self.global_types.insert(name, (elem, address_space));
+        Ok(())
+    }
+
     pub(super) fn export_global(
         &mut self,
         global: &ops::GlobalOp,
@@ -126,8 +138,33 @@ impl<'a> ModuleExportState<'a> {
 
         // Track ALL kernels if backend requires annotations for every kernel
         if is_kernel && self.track_all_kernels {
+            // In typed-pointer mode, capture the rendered signature `<ret> (<args>)` so
+            // `@llvm.used` / `!nvvm.annotations` can reference the kernel as `<sig>* @k`
+            // (opaque `ptr @k` is unavailable on pre-Hopper libNVVM).
+            let signature = if self.typed_pointers {
+                use pliron::r#type::TypeObj;
+                let ft = Ptr::<TypeObj>::from(func.get_type(self.ctx));
+                let ft_ref = ft.deref(self.ctx);
+                let func_ty = ft_ref
+                    .downcast_ref::<FuncType>()
+                    .ok_or("Not a function type")?;
+                let mut sig = String::new();
+                self.export_type(func_ty.result_type(), &mut sig)?;
+                sig.push_str(" (");
+                for (i, arg_ty) in func_ty.arg_types().iter().enumerate() {
+                    if i > 0 {
+                        sig.push_str(", ");
+                    }
+                    self.export_type(*arg_ty, &mut sig)?;
+                }
+                sig.push(')');
+                sig
+            } else {
+                String::new()
+            };
             self.all_kernels.push(KernelInfo {
                 name: fixed_func_name.clone(),
+                signature,
             });
         }
 
@@ -376,6 +413,25 @@ impl<'a> ModuleExportState<'a> {
                     if let Some(address_of) = op_dyn.downcast_ref::<ops::AddressOfOp>() {
                         let global_name = address_of.get_global_name(self.ctx);
                         let res = op_ref.get_result(0);
+                        if self.typed_pointers {
+                            // Register `@g` as an `i8*` bitcast constexpr so it is pointer-uniform
+                            // like every SSA pointer value. Its real type is `<elem> as(A)*`.
+                            if let Some((elem, a)) = self.global_types.get(global_name.as_str()) {
+                                let (src, dst) = if *a != 0 {
+                                    (
+                                        format!("{elem} addrspace({a})*"),
+                                        format!("i8 addrspace({a})*"),
+                                    )
+                                } else {
+                                    (format!("{elem}*"), "i8*".to_string())
+                                };
+                                value_names.insert(
+                                    res,
+                                    format!("bitcast ({src} @{global_name} to {dst})"),
+                                );
+                                continue;
+                            }
+                        }
                         value_names.insert(res, format!("@{global_name}"));
                         continue;
                     }

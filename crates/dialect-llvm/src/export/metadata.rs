@@ -28,14 +28,32 @@ pub(super) fn emit_nvvm_annotations(
         .chain(state.launch_bounds_kernels.iter().map(|k| k.name.as_str()))
         .collect();
 
+    // Typed-pointer mode: `!nvvm.annotations` must reference each kernel as a typed function
+    // pointer `<sig>* @k` (opaque `ptr @k` is rejected by pre-Hopper libNVVM). Look the signature
+    // up from `all_kernels`, which holds every kernel (special ones included).
+    let sig_by_name: std::collections::HashMap<&str, &str> = state
+        .all_kernels
+        .iter()
+        .map(|k| (k.name.as_str(), k.signature.as_str()))
+        .collect();
+    let kref = |name: &str| -> String {
+        if state.typed_pointers {
+            let sig = sig_by_name.get(name).copied().unwrap_or("void ()");
+            format!("{sig}* @{name}")
+        } else {
+            format!("ptr @{name}")
+        }
+    };
+
     // Emit basic annotation for kernels WITHOUT special configs
     if emit_all_annotations {
         for kernel in state.all_kernels.iter() {
             if !special_kernel_names.contains(kernel.name.as_str()) {
                 writeln!(
                     output,
-                    "!{} = !{{ptr @{}, !\"kernel\", i32 1}}",
-                    md_id, kernel.name
+                    "!{} = !{{{}, !\"kernel\", i32 1}}",
+                    md_id,
+                    kref(&kernel.name)
                 )
                 .unwrap();
                 metadata_refs.push(format!("!{}", md_id));
@@ -48,8 +66,8 @@ pub(super) fn emit_nvvm_annotations(
     for cfg in state.cluster_kernels.iter() {
         writeln!(
             output,
-            "!{} = !{{ptr @{}, !\"kernel\", i32 1, !\"cluster_dim_x\", i32 {}, !\"cluster_dim_y\", i32 {}, !\"cluster_dim_z\", i32 {}}}",
-            md_id, cfg.name, cfg.dim_x, cfg.dim_y, cfg.dim_z
+            "!{} = !{{{}, !\"kernel\", i32 1, !\"cluster_dim_x\", i32 {}, !\"cluster_dim_y\", i32 {}, !\"cluster_dim_z\", i32 {}}}",
+            md_id, kref(&cfg.name), cfg.dim_x, cfg.dim_y, cfg.dim_z
         )
         .unwrap();
         metadata_refs.push(format!("!{}", md_id));
@@ -61,15 +79,15 @@ pub(super) fn emit_nvvm_annotations(
         if let Some(min_blocks) = bounds.min_blocks {
             writeln!(
                 output,
-                "!{} = !{{ptr @{}, !\"kernel\", i32 1, !\"maxntidx\", i32 {}, !\"minctasm\", i32 {}}}",
-                md_id, bounds.name, bounds.max_threads, min_blocks
+                "!{} = !{{{}, !\"kernel\", i32 1, !\"maxntidx\", i32 {}, !\"minctasm\", i32 {}}}",
+                md_id, kref(&bounds.name), bounds.max_threads, min_blocks
             )
             .unwrap();
         } else {
             writeln!(
                 output,
-                "!{} = !{{ptr @{}, !\"kernel\", i32 1, !\"maxntidx\", i32 {}}}",
-                md_id, bounds.name, bounds.max_threads
+                "!{} = !{{{}, !\"kernel\", i32 1, !\"maxntidx\", i32 {}}}",
+                md_id, kref(&bounds.name), bounds.max_threads
             )
             .unwrap();
         }

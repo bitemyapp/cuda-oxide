@@ -30,6 +30,10 @@ pub(super) struct KernelLaunchBounds {
 /// Basic kernel info (for backends that need annotations for all kernels).
 pub(super) struct KernelInfo {
     pub(super) name: String,
+    /// Rendered function type `<ret> (<args>)` (typed-pointer mode only, else empty). Used to
+    /// form the typed function-pointer references `<sig>* @k` that `@llvm.used` and
+    /// `!nvvm.annotations` require when opaque `ptr` is unavailable (pre-Hopper libNVVM).
+    pub(super) signature: String,
 }
 
 pub(super) struct ModuleExportState<'a> {
@@ -48,6 +52,15 @@ pub(super) struct ModuleExportState<'a> {
     pub(super) emit_ptx_kernel_keyword: bool,
     /// Track device function names for @llvm.used (standalone device fn compilation)
     pub(super) device_functions: Vec<String>,
+    /// Emit LLVM-7-style typed pointers (`i8*`) with per-op bitcasts instead of opaque `ptr`.
+    /// See [`crate::export::ExportBackendConfig::typed_pointers`].
+    pub(super) typed_pointers: bool,
+    /// Monotonic counter for the fresh `%tp.N` temporaries introduced by typed-pointer bitcasts.
+    pub(super) tp_temp: usize,
+    /// Typed-pointer mode: global symbol name -> (rendered element type, address space). Lets a
+    /// global reference (`@g`) be registered as an `i8*` bitcast constexpr so every pointer value
+    /// is `i8*`-uniform. Populated by a globals pre-pass before functions are exported.
+    pub(super) global_types: HashMap<String, (String, u32)>,
 }
 
 impl<'a> ModuleExportState<'a> {
@@ -55,6 +68,7 @@ impl<'a> ModuleExportState<'a> {
         ctx: &'a pliron::context::Context,
         track_all_kernels: bool,
         emit_ptx_kernel_keyword: bool,
+        typed_pointers: bool,
     ) -> Self {
         Self {
             ctx,
@@ -65,7 +79,17 @@ impl<'a> ModuleExportState<'a> {
             track_all_kernels,
             emit_ptx_kernel_keyword,
             device_functions: Vec::new(),
+            typed_pointers,
+            tp_temp: 0,
+            global_types: HashMap::new(),
         }
+    }
+
+    /// Allocate a fresh `%tp.N` SSA name for a typed-pointer bitcast temporary.
+    pub(super) fn fresh_tp_temp(&mut self) -> String {
+        let name = format!("%tp.{}", self.tp_temp);
+        self.tp_temp += 1;
+        name
     }
 
     /// Check if a function name is a known convergent intrinsic.

@@ -430,6 +430,80 @@ impl<'a> ModuleExportState<'a> {
         Ok(())
     }
 
+    /// Render a type to a fresh `String` (typed-pointer helper).
+    fn type_to_string(&self, ty: Ptr<pliron::r#type::TypeObj>) -> Result<String, String> {
+        let mut s = String::new();
+        self.export_type(ty, &mut s)?;
+        Ok(s)
+    }
+
+    /// Typed-pointer form of a `<elem>*` pointer, preserving address space.
+    fn typed_ptr_str(elem: &str, addrspace: u32) -> String {
+        if addrspace != 0 {
+            format!("{elem} addrspace({addrspace})*")
+        } else {
+            format!("{elem}*")
+        }
+    }
+
+    /// Emit `  %tp.N = bitcast i8<as>* PTR to ELEM<as>*` and return the fresh temp name.
+    /// The source is always `i8*` because every pointer SSA value is `i8*`-uniform in typed
+    /// mode (globals are pre-registered as `i8*` bitcast constexprs, see `export_function`).
+    fn tp_bitcast_ptr(
+        &mut self,
+        ptr_rendered: &str,
+        addrspace: u32,
+        elem: &str,
+        output: &mut String,
+    ) -> String {
+        let tmp = self.fresh_tp_temp();
+        let src = Self::typed_ptr_str("i8", addrspace);
+        let dst = Self::typed_ptr_str(elem, addrspace);
+        writeln!(output, "  {tmp} = bitcast {src} {ptr_rendered} to {dst}").unwrap();
+        tmp
+    }
+
+    /// The pointee type a GEP produces: start at the source element type, then descend through
+    /// each index AFTER the first (the first index is the base pointer stride and does not change
+    /// the pointee). Array/vector indices descend to the element type; struct indices (always
+    /// constant in LLVM) descend to the selected field.
+    fn gep_result_elem_type(
+        &self,
+        src_elem: Ptr<pliron::r#type::TypeObj>,
+        indices: &[GepIndexAttr],
+    ) -> Ptr<pliron::r#type::TypeObj> {
+        let mut cur = src_elem;
+        for idx in indices.iter().skip(1) {
+            let cur_ref = cur.deref(self.ctx);
+            if let Some(arr) = cur_ref.downcast_ref::<crate::types::ArrayType>() {
+                cur = arr.elem_type();
+            } else if let Some(vec) = cur_ref.downcast_ref::<crate::types::VectorType>() {
+                cur = vec.elem_type();
+            } else if let Some(st) = cur_ref.downcast_ref::<crate::types::StructType>() {
+                let field = match idx {
+                    GepIndexAttr::Constant(k) => *k as usize,
+                    GepIndexAttr::OperandIdx(_) => 0, // structs require constant indices
+                };
+                cur = st.fields().nth(field).unwrap_or(cur);
+            } else {
+                break;
+            }
+        }
+        cur
+    }
+
+    /// Render a pointer operand to a `String`. In typed mode the operand's declared type is
+    /// `i8<as>*`; this returns just the value token (e.g. `%v5` or an `@g` constexpr).
+    fn ptr_operand_str(
+        &self,
+        ptr: Value,
+        value_names: &HashMap<Value, String>,
+    ) -> Result<String, String> {
+        let mut s = String::new();
+        self.export_value(ptr, value_names, &mut s)?;
+        Ok(s)
+    }
+
     fn emit_load(
         &mut self,
         op: &ops::LoadOp,
@@ -439,9 +513,18 @@ impl<'a> ModuleExportState<'a> {
         let op_ref = op.get_operation().deref(self.ctx);
         let res = op_ref.get_result(0);
         let ptr = op_ref.get_operand(0);
-        let res_name = value_names.get(&res).unwrap();
+        let res_name = value_names.get(&res).unwrap().clone();
         let ty = res.get_type(self.ctx);
         let addrspace = addrspace_of(ptr.get_type(self.ctx), self.ctx);
+
+        if self.typed_pointers {
+            let elem = self.type_to_string(ty)?;
+            let ptr_str = self.ptr_operand_str(ptr, value_names)?;
+            let typed_ptr = self.tp_bitcast_ptr(&ptr_str, addrspace, &elem, output);
+            let dst = Self::typed_ptr_str(&elem, addrspace);
+            writeln!(output, "  {res_name} = load {elem}, {dst} {typed_ptr}").unwrap();
+            return Ok(());
+        }
 
         write!(output, "  {res_name} = load ").unwrap();
         self.export_type(ty, output)?;
@@ -462,6 +545,20 @@ impl<'a> ModuleExportState<'a> {
         let ptr = op_ref.get_operand(1);
         let addrspace = addrspace_of(ptr.get_type(self.ctx), self.ctx);
 
+        if self.typed_pointers {
+            let elem = self.type_to_string(val.get_type(self.ctx))?;
+            let val_str = {
+                let mut s = String::new();
+                self.export_value(val, value_names, &mut s)?;
+                s
+            };
+            let ptr_str = self.ptr_operand_str(ptr, value_names)?;
+            let typed_ptr = self.tp_bitcast_ptr(&ptr_str, addrspace, &elem, output);
+            let dst = Self::typed_ptr_str(&elem, addrspace);
+            writeln!(output, "  store {elem} {val_str}, {dst} {typed_ptr}").unwrap();
+            return Ok(());
+        }
+
         write!(output, "  store ").unwrap();
         self.export_type(val.get_type(self.ctx), output)?;
         write!(output, " ").unwrap();
@@ -480,13 +577,23 @@ impl<'a> ModuleExportState<'a> {
     ) -> Result<(), String> {
         let op_ref = op.get_operation().deref(self.ctx);
         let res = op_ref.get_result(0);
-        let res_name = value_names.get(&res).unwrap();
+        let res_name = value_names.get(&res).unwrap().clone();
         let elem_ty = op
             .get_attr_alloca_element_type(self.ctx)
-            .expect("Missing alloca_element_type");
+            .expect("Missing alloca_element_type")
+            .get_type(self.ctx);
+
+        if self.typed_pointers {
+            // `alloca T` yields `T*`; uniformize to `i8*` for the canonical result name.
+            let elem = self.type_to_string(elem_ty)?;
+            let raw = format!("{res_name}.tpraw");
+            writeln!(output, "  {raw} = alloca {elem}").unwrap();
+            writeln!(output, "  {res_name} = bitcast {elem}* {raw} to i8*").unwrap();
+            return Ok(());
+        }
 
         write!(output, "  {res_name} = alloca ").unwrap();
-        self.export_type(elem_ty.get_type(self.ctx), output)?;
+        self.export_type(elem_ty, output)?;
         writeln!(output).unwrap();
         Ok(())
     }
@@ -499,7 +606,7 @@ impl<'a> ModuleExportState<'a> {
     ) -> Result<(), String> {
         let op_ref = op.get_operation().deref(self.ctx);
         let res = op_ref.get_result(0);
-        let res_name = value_names.get(&res).unwrap();
+        let res_name = value_names.get(&res).unwrap().clone();
         let ptr = op_ref.get_operand(0);
         let elem_ty = op
             .get_attr_gep_src_elem_type(self.ctx)
@@ -507,25 +614,49 @@ impl<'a> ModuleExportState<'a> {
             .get_type(self.ctx);
         let addrspace = addrspace_of(ptr.get_type(self.ctx), self.ctx);
 
+        // Render the index list once (shared by both modes).
+        let mut indices_str = String::new();
+        for idx_attr in &op.get_attr_gep_indices(self.ctx).unwrap().0 {
+            write!(indices_str, ", ").unwrap();
+            match idx_attr {
+                GepIndexAttr::Constant(val) => {
+                    write!(indices_str, "i32 {val}").unwrap();
+                }
+                GepIndexAttr::OperandIdx(operand_idx) => {
+                    let val = op_ref.get_operand(*operand_idx);
+                    self.export_type(val.get_type(self.ctx), &mut indices_str)?;
+                    write!(indices_str, " ").unwrap();
+                    self.export_value(val, value_names, &mut indices_str)?;
+                }
+            }
+        }
+
+        if self.typed_pointers {
+            let src_elem = self.type_to_string(elem_ty)?;
+            let ptr_str = self.ptr_operand_str(ptr, value_names)?;
+            let typed_base = self.tp_bitcast_ptr(&ptr_str, addrspace, &src_elem, output);
+            let src_ptr = Self::typed_ptr_str(&src_elem, addrspace);
+            let raw = format!("{res_name}.tpraw");
+            writeln!(
+                output,
+                "  {raw} = getelementptr inbounds {src_elem}, {src_ptr} {typed_base}{indices_str}"
+            )
+            .unwrap();
+            // Uniformize the result (a `U addrspace(A)*`) back to `i8 addrspace(A)*`.
+            let result_elem_ty =
+                self.gep_result_elem_type(elem_ty, &op.get_attr_gep_indices(self.ctx).unwrap().0);
+            let result_elem = self.type_to_string(result_elem_ty)?;
+            let result_ptr = Self::typed_ptr_str(&result_elem, addrspace);
+            let dst = Self::typed_ptr_str("i8", addrspace);
+            writeln!(output, "  {res_name} = bitcast {result_ptr} {raw} to {dst}").unwrap();
+            return Ok(());
+        }
+
         write!(output, "  {res_name} = getelementptr inbounds ").unwrap();
         self.export_type(elem_ty, output)?;
         write!(output, ", {}", ptr_qualifier(addrspace)).unwrap();
         self.export_value(ptr, value_names, output)?;
-
-        for idx_attr in &op.get_attr_gep_indices(self.ctx).unwrap().0 {
-            write!(output, ", ").unwrap();
-            match idx_attr {
-                GepIndexAttr::Constant(val) => {
-                    write!(output, "i32 {val}").unwrap();
-                }
-                GepIndexAttr::OperandIdx(operand_idx) => {
-                    let val = op_ref.get_operand(*operand_idx);
-                    self.export_type(val.get_type(self.ctx), output)?;
-                    write!(output, " ").unwrap();
-                    self.export_value(val, value_names, output)?;
-                }
-            }
-        }
+        write!(output, "{indices_str}").unwrap();
         writeln!(output).unwrap();
         Ok(())
     }
@@ -1084,12 +1215,14 @@ impl<'a> ModuleExportState<'a> {
         // so there is nothing to emit here. The assertion keeps the contract
         // honest if the pre-pass is ever refactored.
         let res = op.get_operation().deref(self.ctx).get_result(0);
+        // Opaque mode registers the result as `@name`; typed-pointer mode registers it as an
+        // `i8*` bitcast constexpr (`bitcast (<sig>* @name to i8*)`) so the global is pointer-
+        // uniform. Both are virtual — every use site prints the registered token inline.
         debug_assert!(
-            value_names
-                .get(&res)
-                .is_some_and(|name| name.starts_with('@')),
-            "AddressOfOp result must be pre-registered as a global symbol by \
-             the naming pre-pass; got {:?}",
+            value_names.get(&res).is_some_and(|name| name.starts_with('@')
+                || name.starts_with("bitcast (")),
+            "AddressOfOp result must be pre-registered as a global symbol (or typed-pointer \
+             bitcast constexpr) by the naming pre-pass; got {:?}",
             value_names.get(&res),
         );
     }

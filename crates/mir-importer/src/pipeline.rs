@@ -628,9 +628,29 @@ fn export_llvm_ir(
         .ok_or_else(|| PipelineError::Export("Not a module op".to_string()))?;
 
     let llvm_ir = if emit_nvvm_ir {
-        let config = dialect_llvm::export::NvvmExportConfig;
-        dialect_llvm::export::export_module_with_externs(ctx, &module_op, device_externs, &config)
+        // libNVVM's legacy parser (pre-Hopper targets, sm_89 / Ada and older) rejects opaque
+        // `ptr`; CUDA_OXIDE_TYPED_POINTERS=1 selects LLVM-7-style typed-pointer emission for
+        // those targets. Unset (the default) keeps the opaque NVVM 2.0 output byte-for-byte,
+        // so sm_90+ production builds are unaffected.
+        if std::env::var_os("CUDA_OXIDE_TYPED_POINTERS").is_some() {
+            let config = dialect_llvm::export::NvvmTypedPtrExportConfig;
+            dialect_llvm::export::export_module_with_externs(
+                ctx,
+                &module_op,
+                device_externs,
+                &config,
+            )
             .map_err(PipelineError::Export)?
+        } else {
+            let config = dialect_llvm::export::NvvmExportConfig;
+            dialect_llvm::export::export_module_with_externs(
+                ctx,
+                &module_op,
+                device_externs,
+                &config,
+            )
+            .map_err(PipelineError::Export)?
+        }
     } else {
         let config = dialect_llvm::export::PtxExportConfig;
         dialect_llvm::export::export_module_with_externs(ctx, &module_op, device_externs, &config)

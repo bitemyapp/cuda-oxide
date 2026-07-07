@@ -37,7 +37,9 @@ pub(super) fn export_module_with_externs_impl(
     let mut output = String::new();
     let emit_all_annotations = config.emit_all_kernel_annotations();
     let emit_ptx_kernel_keyword = config.emit_ptx_kernel_keyword();
-    let mut state = ModuleExportState::new(ctx, emit_all_annotations, emit_ptx_kernel_keyword);
+    let typed_pointers = config.typed_pointers();
+    let mut state =
+        ModuleExportState::new(ctx, emit_all_annotations, emit_ptx_kernel_keyword, typed_pointers);
 
     // 1. Header
     writeln!(
@@ -95,6 +97,17 @@ pub(super) fn export_module_with_externs_impl(
         .collect();
 
     let region = module.get_region(ctx).deref(ctx);
+    // Typed-pointer pre-pass: record global element types + address spaces before functions so
+    // `AddressOf` results can be registered as `i8*` bitcast constexprs (uniform pointer typing).
+    if state.typed_pointers {
+        if let Some(block) = region.iter(ctx).next() {
+            for op in block.deref(ctx).iter(ctx) {
+                if let Some(global) = Operation::get_op::<ops::GlobalOp>(op, ctx) {
+                    state.record_global_type(&global)?;
+                }
+            }
+        }
+    }
     if let Some(block) = region.iter(ctx).next() {
         let mut last_was_decl = false;
         for op in block.deref(ctx).iter(ctx) {
@@ -136,15 +149,24 @@ pub(super) fn export_module_with_externs_impl(
     if config.emit_llvm_used() {
         let mut used_refs: Vec<String> = Vec::new();
 
+        // Typed-pointer mode uses `i8*` array elements with a bitcast constexpr per entry
+        // (`i8* bitcast (<sig>* @k to i8*)`); opaque mode uses `ptr @k`.
+        let elem_ty = if state.typed_pointers { "i8*" } else { "ptr" };
         // Include all kernels
         for k in &state.all_kernels {
-            used_refs.push(format!("ptr @{}", k.name));
+            if state.typed_pointers {
+                used_refs.push(format!("i8* bitcast ({}* @{} to i8*)", k.signature, k.name));
+            } else {
+                used_refs.push(format!("ptr @{}", k.name));
+            }
         }
 
-        // Include standalone device functions (when no kernels present)
+        // Include standalone device functions (when no kernels present). These are only tracked
+        // by the opaque NVVM/PTX device-function path, so typed mode never reaches this branch
+        // with entries; keep the opaque form.
         if state.all_kernels.is_empty() {
             for name in &state.device_functions {
-                used_refs.push(format!("ptr @{}", name));
+                used_refs.push(format!("ptr @{name}"));
             }
         }
 
@@ -152,8 +174,9 @@ pub(super) fn export_module_with_externs_impl(
             writeln!(&mut output).unwrap();
             writeln!(
                 &mut output,
-                "@llvm.used = appending global [{} x ptr] [{}], section \"llvm.metadata\"",
+                "@llvm.used = appending global [{} x {}] [{}], section \"llvm.metadata\"",
                 used_refs.len(),
+                elem_ty,
                 used_refs.join(", ")
             )
             .unwrap();
@@ -207,7 +230,9 @@ pub(super) fn export_module_to_string_with_config(
     let mut output = String::new();
     let emit_all_annotations = config.emit_all_kernel_annotations();
     let emit_ptx_kernel_keyword = config.emit_ptx_kernel_keyword();
-    let mut state = ModuleExportState::new(ctx, emit_all_annotations, emit_ptx_kernel_keyword);
+    let typed_pointers = config.typed_pointers();
+    let mut state =
+        ModuleExportState::new(ctx, emit_all_annotations, emit_ptx_kernel_keyword, typed_pointers);
 
     // 1. Header
     writeln!(
@@ -235,6 +260,16 @@ pub(super) fn export_module_to_string_with_config(
 
     // 2. Process Globals and Functions (including intrinsic declarations)
     let region = module.get_region(ctx).deref(ctx);
+    // Typed-pointer pre-pass (see the other export entry point for rationale).
+    if state.typed_pointers {
+        if let Some(block) = region.iter(ctx).next() {
+            for op in block.deref(ctx).iter(ctx) {
+                if let Some(global) = Operation::get_op::<ops::GlobalOp>(op, ctx) {
+                    state.record_global_type(&global)?;
+                }
+            }
+        }
+    }
     if let Some(block) = region.iter(ctx).next() {
         let mut last_was_decl = false;
         for op in block.deref(ctx).iter(ctx) {

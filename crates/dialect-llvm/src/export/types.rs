@@ -24,7 +24,16 @@ impl<'a> ModuleExportState<'a> {
             write!(output, "i{}", int_ty.width()).unwrap();
         } else if let Some(ptr_ty) = ty_ref.downcast_ref::<PointerType>() {
             let addrspace = ptr_ty.address_space();
-            if addrspace != 0 {
+            if self.typed_pointers {
+                // LLVM-7 typed-pointer mode: the dialect pointer type is opaque (address space
+                // only), so every pointer SSA value is uniformly `i8*` and each op bitcasts it
+                // to the concrete access type. Preserve the address space.
+                if addrspace != 0 {
+                    write!(output, "i8 addrspace({addrspace})*").unwrap();
+                } else {
+                    write!(output, "i8*").unwrap();
+                }
+            } else if addrspace != 0 {
                 write!(output, "ptr addrspace({addrspace})").unwrap();
             } else {
                 write!(output, "ptr").unwrap();

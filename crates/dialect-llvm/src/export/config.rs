@@ -40,6 +40,17 @@ pub trait ExportBackendConfig {
 
     /// Whether kernel definitions should use the `ptx_kernel` calling convention.
     fn emit_ptx_kernel_keyword(&self) -> bool;
+
+    /// Whether to emit LLVM-7-style TYPED pointers (`i8*`, `i64 addrspace(3)*`, …) instead of
+    /// opaque `ptr`. Required for libNVVM targeting pre-Hopper GPUs (sm_89 / Ada and older):
+    /// its legacy IR parser rejects opaque `ptr`. libNVVM's modern (sm_90+) parser accepts BOTH
+    /// forms, so typed output is also valid on Blackwell — but production keeps opaque there to
+    /// minimize churn; this is opt-in via the pre-Blackwell config. Emitted as `i8*`-uniform
+    /// with per-op `bitcast`s to the concrete access type (dataflow-free reconstruction from each
+    /// op's own element type — the dialect pointer type is opaque, carrying only address space).
+    fn typed_pointers(&self) -> bool {
+        false
+    }
 }
 
 /// Default PTX export configuration.
@@ -113,5 +124,41 @@ impl ExportBackendConfig for NvvmExportConfig {
 
     fn emit_ptx_kernel_keyword(&self) -> bool {
         false
+    }
+}
+
+/// NVVM IR export for pre-Hopper targets (sm_89 / Ada and older): identical to
+/// [`NvvmExportConfig`] except it emits LLVM-7-style typed pointers, which libNVVM's legacy
+/// parser (used for compute_89 and below) requires. See [`ExportBackendConfig::typed_pointers`].
+#[derive(Clone, Debug, Default)]
+pub struct NvvmTypedPtrExportConfig;
+
+impl ExportBackendConfig for NvvmTypedPtrExportConfig {
+    fn datalayout(&self) -> &str {
+        NVPTX_DATALAYOUT_FULL
+    }
+
+    fn emit_llvm_used(&self) -> bool {
+        true
+    }
+
+    fn emit_nvvmir_version(&self) -> bool {
+        true
+    }
+
+    fn nvvmir_version(&self) -> [i32; 4] {
+        [2, 0, 3, 2]
+    }
+
+    fn emit_all_kernel_annotations(&self) -> bool {
+        true
+    }
+
+    fn emit_ptx_kernel_keyword(&self) -> bool {
+        false
+    }
+
+    fn typed_pointers(&self) -> bool {
+        true
     }
 }
