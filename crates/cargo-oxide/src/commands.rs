@@ -216,16 +216,29 @@ pub fn codegen_build_example(
     println!();
 
     let rustflags = build_rustflags(&ctx.backend_so, false);
+    let primary_lib_only = primary_lib_only_requested();
 
     touch_main_rs(&example_dir);
 
     let mut cmd = Command::new("cargo");
-    cmd.args(["build", "--release"])
-        .current_dir(&example_dir)
-        .env("RUSTFLAGS", &rustflags);
+    cmd.current_dir(&example_dir);
+    if primary_lib_only {
+        // `RUSTFLAGS` applies to every crate in the graph. Large standalone
+        // projects normally need CUDA codegen for only their library target;
+        // let Cargo build dependencies with the normal, parallel LLVM backend
+        // and pass our backend flags solely to that primary target.
+        cmd.args(["rustc", "--release", "--lib"]);
+    } else {
+        cmd.args(["build", "--release"])
+            .env("RUSTFLAGS", &rustflags);
+    }
 
     if let Some(features) = features {
         cmd.args(["--features", features]);
+    }
+    if primary_lib_only {
+        cmd.arg("--")
+            .args(backend_rustc_args(&ctx.backend_so, false));
     }
 
     if verbose || std::env::var("CUDA_OXIDE_VERBOSE").is_ok() {
@@ -240,7 +253,14 @@ pub fn codegen_build_example(
     apply_output_mode(&mut cmd, emit_nvvm_ir, arch);
     apply_ld_library_path(&mut cmd);
 
-    println!("Building {}...", example);
+    if primary_lib_only {
+        println!(
+            "Building {} library (CUDA backend limited to primary crate)...",
+            example
+        );
+    } else {
+        println!("Building {}...", example);
+    }
     println!();
 
     let status = cmd.status().expect("Failed to run cargo");
@@ -871,13 +891,7 @@ fn build_rustflags_with_existing(
     debug: bool,
     existing_rustflags: Option<&str>,
 ) -> String {
-    let mut flags = format!(
-        "-Z codegen-backend={} -C opt-level=3 -C debug-assertions=off -Z mir-enable-passes=-JumpThreading -Csymbol-mangling-version=v0 --cfg cuda_oxide_embed --check-cfg=cfg(cuda_oxide_embed)",
-        backend_so.display()
-    );
-    if debug {
-        flags.push_str(" -C debuginfo=2");
-    }
+    let mut flags = backend_rustc_args(backend_so, debug).join(" ");
     if let Some(existing) = existing_rustflags
         && !existing.is_empty()
     {
@@ -885,6 +899,38 @@ fn build_rustflags_with_existing(
         flags.push_str(existing);
     }
     flags
+}
+
+/// rustc arguments required only by the crate that declares CUDA kernels.
+///
+/// Keeping these as argv elements lets `cargo rustc -- ...` scope the custom
+/// backend to the primary target without forcing every dependency through it.
+fn backend_rustc_args(backend_so: &Path, debug: bool) -> Vec<String> {
+    let mut args = vec![
+        "-Z".to_string(),
+        format!("codegen-backend={}", backend_so.display()),
+        "-C".to_string(),
+        "opt-level=3".to_string(),
+        "-C".to_string(),
+        "debug-assertions=off".to_string(),
+        "-Z".to_string(),
+        "mir-enable-passes=-JumpThreading".to_string(),
+        "-Csymbol-mangling-version=v0".to_string(),
+        "--cfg".to_string(),
+        "cuda_oxide_embed".to_string(),
+        "--check-cfg=cfg(cuda_oxide_embed)".to_string(),
+    ];
+    if debug {
+        args.extend(["-C".to_string(), "debuginfo=2".to_string()]);
+    }
+    args
+}
+
+/// Opt in when the current package's library is the only target in the graph
+/// containing CUDA kernels. The default remains the dependency-artifact mode.
+fn primary_lib_only_requested() -> bool {
+    std::env::var("CUDA_OXIDE_PRIMARY_LIB_ONLY")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
 /// Set environment variables for the codegen backend.
@@ -1327,6 +1373,29 @@ mod tests {
 
         assert!(rustflags.contains(" -C debuginfo=2"));
         assert!(!rustflags.ends_with(' '));
+    }
+
+    #[test]
+    fn backend_rustc_args_are_safe_for_cargo_rustc() {
+        let args = backend_rustc_args(Path::new("/tmp/backend with spaces.so"), false);
+
+        assert_eq!(
+            args[0..2],
+            ["-Z", "codegen-backend=/tmp/backend with spaces.so"]
+        );
+        assert!(args.windows(2).any(|pair| pair == ["-C", "opt-level=3"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--cfg", "cuda_oxide_embed"])
+        );
+        assert!(!args.iter().any(|arg| arg == "debuginfo=2"));
+    }
+
+    #[test]
+    fn backend_rustc_args_include_debug_info_when_requested() {
+        let args = backend_rustc_args(Path::new("/tmp/backend.so"), true);
+
+        assert!(args.windows(2).any(|pair| pair == ["-C", "debuginfo=2"]));
     }
 
     #[test]
