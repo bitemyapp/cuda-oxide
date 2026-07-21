@@ -237,8 +237,11 @@ pub fn codegen_build_example(
         cmd.args(["--features", features]);
     }
     if primary_lib_only {
-        cmd.arg("--")
-            .args(backend_rustc_args(&ctx.backend_so, false));
+        cmd.arg("--").args(backend_rustc_args(
+            &ctx.backend_so,
+            false,
+            &requested_opt_level(),
+        ));
     }
 
     if verbose || std::env::var("CUDA_OXIDE_VERBOSE").is_ok() {
@@ -891,7 +894,7 @@ fn build_rustflags_with_existing(
     debug: bool,
     existing_rustflags: Option<&str>,
 ) -> String {
-    let mut flags = backend_rustc_args(backend_so, debug).join(" ");
+    let mut flags = backend_rustc_args(backend_so, debug, &requested_opt_level()).join(" ");
     if let Some(existing) = existing_rustflags
         && !existing.is_empty()
     {
@@ -905,12 +908,12 @@ fn build_rustflags_with_existing(
 ///
 /// Keeping these as argv elements lets `cargo rustc -- ...` scope the custom
 /// backend to the primary target without forcing every dependency through it.
-fn backend_rustc_args(backend_so: &Path, debug: bool) -> Vec<String> {
+fn backend_rustc_args(backend_so: &Path, debug: bool, opt_level: &str) -> Vec<String> {
     let mut args = vec![
         "-Z".to_string(),
         format!("codegen-backend={}", backend_so.display()),
         "-C".to_string(),
-        "opt-level=3".to_string(),
+        format!("opt-level={opt_level}"),
         "-C".to_string(),
         "debug-assertions=off".to_string(),
         "-Z".to_string(),
@@ -924,6 +927,16 @@ fn backend_rustc_args(backend_so: &Path, debug: bool) -> Vec<String> {
         args.extend(["-C".to_string(), "debuginfo=2".to_string()]);
     }
     args
+}
+
+fn requested_opt_level() -> String {
+    let value = std::env::var("CUDA_OXIDE_RUSTC_OPT_LEVEL").unwrap_or_else(|_| "3".to_string());
+    if matches!(value.as_str(), "0" | "1" | "2" | "3" | "s" | "z") {
+        value
+    } else {
+        eprintln!("invalid CUDA_OXIDE_RUSTC_OPT_LEVEL={value:?}; expected 0, 1, 2, 3, s, or z");
+        std::process::exit(2);
+    }
 }
 
 /// Opt in when the current package's library is the only target in the graph
@@ -1377,13 +1390,13 @@ mod tests {
 
     #[test]
     fn backend_rustc_args_are_safe_for_cargo_rustc() {
-        let args = backend_rustc_args(Path::new("/tmp/backend with spaces.so"), false);
+        let args = backend_rustc_args(Path::new("/tmp/backend with spaces.so"), false, "2");
 
         assert_eq!(
             args[0..2],
             ["-Z", "codegen-backend=/tmp/backend with spaces.so"]
         );
-        assert!(args.windows(2).any(|pair| pair == ["-C", "opt-level=3"]));
+        assert!(args.windows(2).any(|pair| pair == ["-C", "opt-level=2"]));
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--cfg", "cuda_oxide_embed"])
@@ -1393,7 +1406,7 @@ mod tests {
 
     #[test]
     fn backend_rustc_args_include_debug_info_when_requested() {
-        let args = backend_rustc_args(Path::new("/tmp/backend.so"), true);
+        let args = backend_rustc_args(Path::new("/tmp/backend.so"), true, "3");
 
         assert!(args.windows(2).any(|pair| pair == ["-C", "debuginfo=2"]));
     }
