@@ -232,12 +232,14 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
     let host_items = cuda_module_host_items(items)?;
     let device_items = items.iter().map(|item| {
         quote! {
+            #[allow(unexpected_cfgs)]
             #[cfg(cuda_oxide_device_codegen)]
             #item
         }
     });
     let host_items = host_items.iter().map(|item| {
         quote! {
+            #[allow(unexpected_cfgs, unused)]
             #[cfg(not(cuda_oxide_device_codegen))]
             #item
         }
@@ -324,7 +326,6 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
     Ok(quote! {
         #(#module_attrs)*
         #[allow(unexpected_cfgs)]
-        #[cfg_attr(not(cuda_oxide_device_codegen), allow(unused))]
         #vis mod #ident {
             #(#device_items)*
             #(#host_items)*
