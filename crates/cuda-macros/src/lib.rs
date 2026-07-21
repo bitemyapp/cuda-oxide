@@ -216,6 +216,33 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
         ));
     }
 
+    // `cargo oxide` compiles this module twice: once through the CUDA backend
+    // to produce the device artifact, then once through the ordinary host
+    // backend to produce the executable that loads that artifact.  The host
+    // build needs kernel signatures, marker types, constants, and launch
+    // bindings, but it must never execute the Rust copies of device bodies.
+    //
+    // Keeping the original bodies in the host crate is especially expensive
+    // for generated kernels: LLVM can spend hours optimizing code that is
+    // unreachable in the final executable.  Expand literal includes here and
+    // replace only non-const function bodies with a diverging stub for the
+    // host half.  Const functions retain their bodies because host constants
+    // may evaluate them.  The CUDA half remains byte-for-byte the original
+    // source and is selected by the cfg passed only to the custom backend.
+    let host_items = cuda_module_host_items(items)?;
+    let device_items = items.iter().map(|item| {
+        quote! {
+            #[cfg(cuda_oxide_device_codegen)]
+            #item
+        }
+    });
+    let host_items = host_items.iter().map(|item| {
+        quote! {
+            #[cfg(not(cuda_oxide_device_codegen))]
+            #item
+        }
+    });
+
     let non_generic_kernels = kernels.iter().filter(|kernel| !kernel.is_generic);
     let function_fields = non_generic_kernels.clone().map(|kernel| {
         let cfg_attrs = &kernel.cfg_attrs;
@@ -298,7 +325,8 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
         #(#module_attrs)*
         #[allow(unexpected_cfgs)]
         #vis mod #ident {
-            #(#items)*
+            #(#device_items)*
+            #(#host_items)*
 
             #artifact_anchor_items
 
@@ -352,6 +380,68 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
             }
         }
     })
+}
+
+/// Produce the host-visible half of a `#[cuda_module]` body.
+///
+/// Literal `include!("...")` inputs are expanded recursively so generated
+/// device functions are stripped too. Dynamic includes (for example an
+/// `OUT_DIR` constants file) are preserved because their contents are not
+/// available to the procedural macro as a literal path.
+fn cuda_module_host_items(items: &[Item]) -> syn::Result<Vec<TokenStream2>> {
+    let mut output = Vec::new();
+    for item in items {
+        cuda_module_host_item(item, &mut output)?;
+    }
+    Ok(output)
+}
+
+fn cuda_module_host_item(item: &Item, output: &mut Vec<TokenStream2>) -> syn::Result<()> {
+    match item {
+        Item::Fn(item_fn) if item_fn.sig.constness.is_none() => {
+            let mut stub = item_fn.clone();
+            stub.block = Box::new(parse_quote!({
+                unreachable!("cuda-oxide device function executed by host")
+            }));
+            output.push(quote! { #stub });
+        }
+        Item::Mod(item_mod) => {
+            let nested_items = if let Some((_brace, nested_items)) = &item_mod.content {
+                Some(nested_items.clone())
+            } else {
+                read_cuda_module_file_items(item_mod)?
+            };
+            let Some(nested_items) = nested_items else {
+                output.push(quote! { #item_mod });
+                return Ok(());
+            };
+            let nested = cuda_module_host_items(&nested_items)?;
+            let attrs = item_mod
+                .attrs
+                .iter()
+                .filter(|attr| !attr.path().is_ident("path"));
+            let vis = &item_mod.vis;
+            let unsafety = &item_mod.unsafety;
+            let ident = &item_mod.ident;
+            output.push(quote! {
+                #(#attrs)*
+                #vis #unsafety mod #ident {
+                    #(#nested)*
+                }
+            });
+        }
+        Item::Macro(item_macro) => {
+            if let Some(included_items) = read_cuda_module_include_items(item_macro)? {
+                for included in &included_items {
+                    cuda_module_host_item(included, output)?;
+                }
+            } else {
+                output.push(quote! { #item_macro });
+            }
+        }
+        _ => output.push(quote! { #item }),
+    }
+    Ok(())
 }
 
 fn collect_cuda_module_kernels(items: &[Item]) -> syn::Result<Vec<CudaModuleKernel>> {
@@ -439,25 +529,36 @@ fn read_cuda_module_items(
     let source = std::fs::read_to_string(path).map_err(|error| {
         syn::Error::new_spanned(
             span,
-            format!("failed to read cuda_module nested module {}: {error}", path.display()),
+            format!(
+                "failed to read cuda_module nested module {}: {error}",
+                path.display()
+            ),
         )
     })?;
     let file = syn::parse_file(&source).map_err(|error| {
         syn::Error::new_spanned(
             span,
-            format!("failed to parse cuda_module nested module {}: {error}", path.display()),
+            format!(
+                "failed to parse cuda_module nested module {}: {error}",
+                path.display()
+            ),
         )
     })?;
     Ok(Some(file.items))
 }
 
 fn cuda_module_file_path(item_mod: &syn::ItemMod) -> syn::Result<Option<std::path::PathBuf>> {
-    let path_attr = item_mod.attrs.iter().find(|attr| attr.path().is_ident("path"));
+    let path_attr = item_mod
+        .attrs
+        .iter()
+        .find(|attr| attr.path().is_ident("path"));
     let relative = match path_attr {
         Some(attr) => attr.parse_args::<syn::LitStr>()?.value(),
         None => format!("{}.rs", item_mod.ident),
     };
-    Ok(cuda_module_relative_path(std::path::PathBuf::from(relative)))
+    Ok(cuda_module_relative_path(std::path::PathBuf::from(
+        relative,
+    )))
 }
 
 fn cuda_module_relative_path(relative: std::path::PathBuf) -> Option<std::path::PathBuf> {

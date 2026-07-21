@@ -922,6 +922,9 @@ fn backend_rustc_args(backend_so: &Path, debug: bool, opt_level: &str) -> Vec<St
         "--cfg".to_string(),
         "cuda_oxide_embed".to_string(),
         "--check-cfg=cfg(cuda_oxide_embed)".to_string(),
+        "--cfg".to_string(),
+        "cuda_oxide_device_codegen".to_string(),
+        "--check-cfg=cfg(cuda_oxide_device_codegen)".to_string(),
     ];
     if debug {
         args.extend(["-C".to_string(), "debuginfo=2".to_string()]);
@@ -1405,6 +1408,10 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--cfg", "cuda_oxide_embed"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--cfg", "cuda_oxide_device_codegen"])
         );
         assert!(!args.iter().any(|arg| arg == "debuginfo=2"));
     }
