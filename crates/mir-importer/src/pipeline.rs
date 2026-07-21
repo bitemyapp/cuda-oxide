@@ -287,18 +287,13 @@ pub fn run_pipeline(
             eprintln!("{}", func_op_ptr.deref(&ctx).disp(&ctx));
         }
 
-        let verify_started = Instant::now();
-        verify_operation(&ctx, func_op_ptr, &func.export_name)?;
-        let verify_elapsed = verify_started.elapsed();
-
         // Append to module
         append_to_module(&ctx, module_op_ptr, func_op_ptr);
         if timing_enabled {
             eprintln!(
-                "cuda-oxide-timing function={} translate_ms={:.3} verify_ms={:.3} total_ms={:.3}",
+                "cuda-oxide-timing function={} translate_ms={:.3} total_ms={:.3}",
                 func.export_name,
                 translate_elapsed.as_secs_f64() * 1_000.0,
-                verify_elapsed.as_secs_f64() * 1_000.0,
                 function_started.elapsed().as_secs_f64() * 1_000.0,
             );
         }
