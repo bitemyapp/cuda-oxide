@@ -354,7 +354,7 @@ pub struct CudaCodegenBackend {
 }
 
 struct CudaOngoingCodegen {
-    host: Box<dyn Any>,
+    host: Option<Box<dyn Any>>,
     artifact_objects: Vec<PathBuf>,
 }
 
@@ -376,6 +376,9 @@ pub struct CudaCodegenConfig {
     pub dump_llvm_dialect: bool,
     /// Override PTX output directory (defaults to current directory).
     pub ptx_output_dir: Option<std::path::PathBuf>,
+    /// Emit only the device artifact object, omitting native host codegen.
+    /// Intended for artifact-extraction builds whose rlib is never linked.
+    pub device_only: bool,
 }
 
 impl CudaCodegenConfig {
@@ -388,6 +391,7 @@ impl CudaCodegenConfig {
     /// | `CUDA_OXIDE_DUMP_MIR`       | `dump_mir_dialect`  |
     /// | `CUDA_OXIDE_DUMP_LLVM`      | `dump_llvm_dialect` |
     /// | `CUDA_OXIDE_PTX_DIR`        | `ptx_output_dir`    |
+    /// | `CUDA_OXIDE_DEVICE_ONLY`     | `device_only`       |
     pub fn from_env() -> Self {
         Self {
             verbose: std::env::var("CUDA_OXIDE_VERBOSE").is_ok(),
@@ -397,6 +401,7 @@ impl CudaCodegenConfig {
             ptx_output_dir: std::env::var("CUDA_OXIDE_PTX_DIR")
                 .ok()
                 .map(std::path::PathBuf::from),
+            device_only: std::env::var_os("CUDA_OXIDE_DEVICE_ONLY").is_some(),
         }
     }
 }
@@ -651,9 +656,14 @@ impl CodegenBackend for CudaCodegenBackend {
                 None
             };
 
-            // Step 3: Delegate ALL host codegen to LLVM backend
-            // (No logging here - it fires for every crate including dependencies)
-            let host_result = self.llvm_backend.codegen_crate(tcx, crate_info);
+            // Artifact-extraction builds never link this intermediate rlib, so
+            // compiling a second native copy of the enormous prover library is
+            // pure overhead. Ordinary unified builds retain the LLVM host path.
+            let host_result = if self.config.device_only && has_device_code {
+                None
+            } else {
+                Some(self.llvm_backend.codegen_crate(tcx, crate_info))
+            };
 
             // Return the LLVM backend's result
             Box::new(CudaOngoingCodegen {
@@ -672,8 +682,16 @@ impl CodegenBackend for CudaCodegenBackend {
         let ongoing = *ongoing_codegen
             .downcast::<CudaOngoingCodegen>()
             .expect("rustc_codegen_cuda received unexpected ongoing codegen state");
-        let (mut compiled_modules, work_products) =
-            self.llvm_backend.join_codegen(ongoing.host, sess, outputs);
+        let (mut compiled_modules, work_products) = match ongoing.host {
+            Some(host) => self.llvm_backend.join_codegen(host, sess, outputs),
+            None => (
+                CompiledModules {
+                    modules: Vec::new(),
+                    allocator_module: None,
+                },
+                FxIndexMap::default(),
+            ),
+        };
         for (index, object) in ongoing.artifact_objects.into_iter().enumerate() {
             compiled_modules.modules.push(CompiledModule {
                 name: format!("oxide_artifact_embed_{index}"),
