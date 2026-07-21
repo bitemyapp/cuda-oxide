@@ -445,6 +445,31 @@ fn cuda_module_host_item(item: &Item, output: &mut Vec<TokenStream2>) -> syn::Re
     Ok(())
 }
 
+#[cfg(test)]
+mod cuda_module_host_tests {
+    use super::*;
+
+    #[test]
+    fn strips_runtime_bodies_but_preserves_const_evaluation() {
+        let file = syn::parse_file(
+            r#"
+                fn device_helper(input: u64) -> u64 { input.wrapping_mul(7) }
+                const fn table_size() -> usize { 384 }
+                const TABLE_SIZE: usize = table_size();
+            "#,
+        )
+        .unwrap();
+
+        let output_items = cuda_module_host_items(&file.items).unwrap();
+        let output = quote! { #(#output_items)* }.to_string();
+        assert!(output.contains("cuda-oxide device function executed by host"));
+        assert!(!output.contains("wrapping_mul"));
+        assert!(output.contains("const fn table_size"));
+        assert!(output.contains("384"));
+        assert!(output.contains("const TABLE_SIZE"));
+    }
+}
+
 fn collect_cuda_module_kernels(items: &[Item]) -> syn::Result<Vec<CudaModuleKernel>> {
     let mut kernels = Vec::new();
     collect_cuda_module_kernels_in(items, &mut Vec::new(), &mut kernels)?;
