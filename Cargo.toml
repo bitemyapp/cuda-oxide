@@ -23,6 +23,7 @@ members = [
     # Differential codegen fuzzer support
     "crates/fuzzer",
 ]
+exclude = ["vendor/pliron"]
 
 [workspace.package]
 edition = "2024"
@@ -37,10 +38,10 @@ repository = "https://github.com/NVlabs/cuda-oxide.git"
 
 [workspace.dependencies]
 # Pliron MLIR framework
-# Pinned to avoid breakage when upstream `main` moves. Bump deliberately and
-# keep `crates/rustc-codegen-cuda/Cargo.toml` on the same rev.
-pliron = { git = "https://github.com/vaivaswatha/pliron", rev = "b51e73b11648508188184451adebdcf63957b7fe" }
-pliron-derive = { git = "https://github.com/vaivaswatha/pliron", rev = "b51e73b11648508188184451adebdcf63957b7fe" }
+# Vendored from the pinned upstream revision recorded in vendor/pliron/UPSTREAM.md
+# so the CUDA-specific mem2reg hot-path fix is reproducible in both workspaces.
+pliron = { path = "vendor/pliron" }
+pliron-derive = { path = "vendor/pliron/pliron-derive" }
 
 # Internal crates
 dialect-llvm = { path = "crates/dialect-llvm" }

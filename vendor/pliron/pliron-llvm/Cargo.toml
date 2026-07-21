@@ -1,0 +1,30 @@
+[package]
+name = "pliron-llvm"
+description = "LLVM dialect for pliron"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pliron = { path = "../", version = "0" }
+thiserror.workspace = true
+rustc-hash.workspace = true
+# When upgrading the LLVM version, change the LLVM versions in
+# `ci.yml` and the READMEs in `pliron-llvm` and `llvm-opt`.
+llvm-sys = "221"
+log.workspace = true
+bitflags = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+expect-test.workspace = true
+tempfile.workspace = true
+assert_cmd.workspace = true
+env_logger.workspace = true
+cargo-manifest.workspace = true
+which.workspace = true
