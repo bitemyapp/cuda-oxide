@@ -926,6 +926,11 @@ fn backend_rustc_args(backend_so: &Path, debug: bool, opt_level: &str) -> Vec<St
     if debug {
         args.extend(["-C".to_string(), "debuginfo=2".to_string()]);
     }
+    if std::env::var_os("CUDA_OXIDE_DEVICE_ONLY").is_some() {
+        // This intermediate crate is built only to extract its .oxart object;
+        // thousands of host-only diagnostics add megabytes of CI log traffic.
+        args.push("--cap-lints=allow".to_string());
+    }
     args
 }
 
