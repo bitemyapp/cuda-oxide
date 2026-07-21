@@ -379,23 +379,15 @@ fn rename_block(
     block: Ptr<BasicBlock>,
     dom_tree: &DomTree<Ptr<Region>, Context>,
     new_phis_in_block: &FxHashMap<Ptr<BasicBlock>, Vec<(AllocCandidate, usize)>>,
-    reaching_def_map: &FxHashMap<Value, Vec<Value>>,
+    reaching_def_map: &mut FxHashMap<Value, Vec<Value>>,
     default_def_map: &mut FxHashMap<Value, Value>,
     candidates_by_user: &FxHashMap<Ptr<Operation>, Vec<AllocCandidate>>,
 ) -> Result<()> {
-    // We only care about the top of the reaching definition stack for each candidate.
-    let mut reaching_def_map = reaching_def_map
-        .iter()
-        .map(|(&ptr, stack)| {
-            (ptr, {
-                let mut new_stack = Vec::new();
-                if let Some(&val) = stack.last() {
-                    new_stack.push(val);
-                }
-                new_stack
-            })
-        })
-        .collect::<FxHashMap<_, _>>();
+    // Standard SSA renaming mutates definition stacks along the dominator path
+    // and rolls back this block's pushes on return. Cloning the complete map in
+    // every block made generated control-flow graphs quadratic in blocks ×
+    // allocations and generated enormous temporary hash maps.
+    let mut pushed_defs: FxHashMap<Value, usize> = FxHashMap::default();
 
     // Push phi args for this block.
     for &(ref cand, arg_idx) in new_phis_in_block.get(&block).into_iter().flatten() {
@@ -404,6 +396,7 @@ fn rename_block(
             .get_mut(&cand.alloc_info.ptr)
             .unwrap()
             .push(new_val);
+        *pushed_defs.entry(cand.alloc_info.ptr).or_default() += 1;
     }
 
     let ops: Vec<Ptr<Operation>> = block.deref(ctx).iter(ctx).collect();
@@ -430,12 +423,14 @@ fn rename_block(
                         // No reaching definition: use default value
                         let default_val = get_or_create_default_def(cand, ctx, default_def_map)?;
                         reaching_def_stack.push(default_val);
+                        *pushed_defs.entry(ptr).or_default() += 1;
                     }
                     let current_def = *reaching_def_stack.last().unwrap();
                     promote_queue.push((cand.alloc_info.clone(), current_def));
                 }
                 PromotableOpKind::Store(stored_val) => {
                     reaching_def_map.get_mut(&ptr).unwrap().push(stored_val);
+                    *pushed_defs.entry(ptr).or_default() += 1;
                     promote_queue.push((cand.alloc_info.clone(), stored_val));
                 }
                 // Intentionally no-op: this includes the common case where `op`
@@ -472,6 +467,7 @@ fn rename_block(
                 // No reaching definition: use default value
                 let default_val = get_or_create_default_def(cand, ctx, default_def_map)?;
                 reaching_def_stack.push(default_val);
+                *pushed_defs.entry(cand.alloc_info.ptr).or_default() += 1;
             }
             let current_def = *reaching_def_stack.last().unwrap();
             let succ_opd_idx = branch_iface.add_successor_operand(ctx, succ_idx, current_def);
@@ -487,10 +483,15 @@ fn rename_block(
             child,
             dom_tree,
             new_phis_in_block,
-            &reaching_def_map,
+            reaching_def_map,
             default_def_map,
             candidates_by_user,
         )?;
+    }
+
+    for (ptr, count) in pushed_defs {
+        let stack = reaching_def_map.get_mut(&ptr).unwrap();
+        stack.truncate(stack.len() - count);
     }
 
     Ok(())
@@ -563,7 +564,7 @@ pub fn mem2reg(root: Ptr<Operation>, ctx: &mut Context) -> Result<OptStatus> {
         }
 
         // Initialize reaching def map for this region's candidates. The stacks will be mutated during renaming.
-        let reaching_def_map: FxHashMap<Value, Vec<Value>> = alloc_candidates
+        let mut reaching_def_map: FxHashMap<Value, Vec<Value>> = alloc_candidates
             .iter()
             .map(|c| (c.alloc_info.ptr, Vec::new()))
             .collect();
@@ -598,7 +599,7 @@ pub fn mem2reg(root: Ptr<Operation>, ctx: &mut Context) -> Result<OptStatus> {
             entry_block,
             &dom_tree,
             &new_phis_in_block,
-            &reaching_def_map,
+            &mut reaching_def_map,
             &mut default_def_map,
             &candidates_by_user,
         )?;
