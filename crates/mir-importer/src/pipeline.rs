@@ -118,6 +118,7 @@ use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::printable::Printable;
 use std::path::Path;
+use std::time::Instant;
 
 /// Device artifact format produced by a successful pipeline run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +220,9 @@ pub fn run_pipeline(
     device_externs: &[DeviceExternDecl],
     config: &PipelineConfig,
 ) -> Result<CompilationResult, PipelineError> {
+    let timing_enabled = std::env::var_os("CUDA_OXIDE_TIMINGS").is_some();
+    let pipeline_started = Instant::now();
+    let setup_started = Instant::now();
     let mut ctx = Context::new();
 
     // Step 1: Register dialects
@@ -234,9 +238,11 @@ pub fn run_pipeline(
     let module_op_ptr = module.get_operation();
 
     let mut legaliser = Legaliser::default();
+    report_pipeline_timing(timing_enabled, "setup", setup_started);
 
     // Step 3: Translate all functions
     for func in functions {
+        let function_started = Instant::now();
         if config.verbose {
             eprintln!(
                 "Translating {}: {}",
@@ -254,6 +260,7 @@ pub fn run_pipeline(
             .body()
             .ok_or_else(|| PipelineError::NoBody(func.export_name.clone()))?;
 
+        let translate_started = Instant::now();
         let func_op_ptr = crate::translator::body::translate_body(
             &mut ctx,
             &body,
@@ -266,6 +273,7 @@ pub fn run_pipeline(
             // Use .disp(&ctx) for rich error formatting with location and backtrace
             PipelineError::Translation(format!("{}: {}", func.export_name, e.disp(&ctx)))
         })?;
+        let translate_elapsed = translate_started.elapsed();
 
         // Dump the per-function IR BEFORE verification so users can see
         // what the translator produced even when verification fails. If we
@@ -279,10 +287,21 @@ pub fn run_pipeline(
             eprintln!("{}", func_op_ptr.deref(&ctx).disp(&ctx));
         }
 
+        let verify_started = Instant::now();
         verify_operation(&ctx, func_op_ptr, &func.export_name)?;
+        let verify_elapsed = verify_started.elapsed();
 
         // Append to module
         append_to_module(&ctx, module_op_ptr, func_op_ptr);
+        if timing_enabled {
+            eprintln!(
+                "cuda-oxide-timing function={} translate_ms={:.3} verify_ms={:.3} total_ms={:.3}",
+                func.export_name,
+                translate_elapsed.as_secs_f64() * 1_000.0,
+                verify_elapsed.as_secs_f64() * 1_000.0,
+                function_started.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
     }
 
     // Step 4: Verify module. Dump BEFORE verify so module-level verification
@@ -294,7 +313,9 @@ pub fn run_pipeline(
     if config.verbose {
         eprintln!("\n=== Verifying dialect-mir module ===");
     }
+    let module_verify_started = Instant::now();
     verify_operation(&ctx, module_op_ptr, "module")?;
+    report_pipeline_timing(timing_enabled, "mir-module-verify", module_verify_started);
     if config.verbose {
         eprintln!("dialect-mir verification successful ✓");
     }
@@ -307,6 +328,7 @@ pub fn run_pipeline(
     if config.verbose {
         eprintln!("\n=== Running mem2reg ===");
     }
+    let mem2reg_started = Instant::now();
     pliron::opts::mem2reg::mem2reg(module_op_ptr, &mut ctx).map_err(|e| {
         PipelineError::Verification {
             name: "mem2reg".to_string(),
@@ -314,6 +336,7 @@ pub fn run_pipeline(
             operation: None,
         }
     })?;
+    report_pipeline_timing(timing_enabled, "mem2reg", mem2reg_started);
     if config.verbose {
         eprintln!("mem2reg successful ✓");
     }
@@ -321,13 +344,21 @@ pub fn run_pipeline(
         eprintln!("\n=== dialect-mir module (after mem2reg) ===");
         eprintln!("{}", module_op_ptr.deref(&ctx).disp(&ctx));
     }
+    let post_mem2reg_verify_started = Instant::now();
     verify_operation(&ctx, module_op_ptr, "module post-mem2reg")?;
+    report_pipeline_timing(
+        timing_enabled,
+        "mir-post-mem2reg-verify",
+        post_mem2reg_verify_started,
+    );
 
     // Step 5: Lower dialect-mir → dialect-llvm.
     if config.verbose {
         eprintln!("\n=== Lowering dialect-mir → dialect-llvm ===");
     }
+    let lower_started = Instant::now();
     lower_to_llvm(&mut ctx, module_op_ptr)?;
+    report_pipeline_timing(timing_enabled, "lower-to-llvm", lower_started);
 
     // Step 5.5: Add device extern declarations to the dialect-llvm module.
     // These are needed before verification so calls to extern functions are valid.
@@ -350,7 +381,9 @@ pub fn run_pipeline(
     if config.verbose {
         eprintln!("=== Verifying dialect-llvm module ===");
     }
+    let llvm_verify_started = Instant::now();
     verify_operation(&ctx, module_op_ptr, "llvm module")?;
+    report_pipeline_timing(timing_enabled, "llvm-module-verify", llvm_verify_started);
     if config.verbose {
         eprintln!("dialect-llvm verification successful ✓");
     }
@@ -367,7 +400,9 @@ pub fn run_pipeline(
     //      it.
     // The example is then expected to feed the `.ll` through the LTOIR
     // pipeline (compile_ltoir + link_ltoir) and load the resulting cubin.
+    let libdevice_scan_started = Instant::now();
     let needs_libdevice = module_uses_libdevice(&ctx, module_op_ptr);
+    report_pipeline_timing(timing_enabled, "libdevice-scan", libdevice_scan_started);
     let emit_nvvm_ir = config.emit_nvvm_ir || needs_libdevice;
     if needs_libdevice && !config.emit_nvvm_ir && config.verbose {
         eprintln!(
@@ -382,7 +417,9 @@ pub fn run_pipeline(
         eprintln!("\n=== Exporting to LLVM IR ({} mode) ===", mode);
     }
     let ll_path = config.output_dir.join(format!("{}.ll", config.output_name));
+    let export_started = Instant::now();
     let _llvm_ir = export_llvm_ir(&ctx, module_op_ptr, device_externs, &ll_path, emit_nvvm_ir)?;
+    report_pipeline_timing(timing_enabled, "export-llvm-ir", export_started);
     if config.verbose {
         eprintln!("LLVM IR written to {}", ll_path.display());
     }
@@ -407,6 +444,7 @@ pub fn run_pipeline(
         // pinned one via CUDA_OXIDE_TARGET; otherwise leave the legacy
         // "nvvm-ir" sentinel that cuda-host's loader knows to re-resolve.
         let target = std::env::var("CUDA_OXIDE_TARGET").unwrap_or_else(|_| "nvvm-ir".to_string());
+        report_pipeline_timing(timing_enabled, "pipeline-total", pipeline_started);
         Ok(CompilationResult {
             artifact_path: ll_path.clone(),
             artifact_kind: CompilationArtifactKind::NvvmIr,
@@ -422,7 +460,9 @@ pub fn run_pipeline(
         let ptx_path = config
             .output_dir
             .join(format!("{}.ptx", config.output_name));
+        let ptx_started = Instant::now();
         let target = generate_ptx(&ll_path, &ptx_path)?;
+        report_pipeline_timing(timing_enabled, "generate-ptx", ptx_started);
         if config.verbose {
             eprintln!(
                 "✓ PTX written to {} (target: {})",
@@ -431,6 +471,7 @@ pub fn run_pipeline(
             );
         }
 
+        report_pipeline_timing(timing_enabled, "pipeline-total", pipeline_started);
         Ok(CompilationResult {
             artifact_path: ptx_path.clone(),
             artifact_kind: CompilationArtifactKind::Ptx,
@@ -438,6 +479,15 @@ pub fn run_pipeline(
             ptx_path,
             target,
         })
+    }
+}
+
+fn report_pipeline_timing(enabled: bool, stage: &str, started: Instant) {
+    if enabled {
+        eprintln!(
+            "cuda-oxide-timing stage={stage} elapsed_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
     }
 }
 
