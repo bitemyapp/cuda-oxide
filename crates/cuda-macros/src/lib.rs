@@ -324,6 +324,7 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
     Ok(quote! {
         #(#module_attrs)*
         #[allow(unexpected_cfgs)]
+        #[cfg_attr(not(cuda_oxide_device_codegen), allow(unused))]
         #vis mod #ident {
             #(#device_items)*
             #(#host_items)*
