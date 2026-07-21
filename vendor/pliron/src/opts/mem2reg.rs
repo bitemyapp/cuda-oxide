@@ -195,6 +195,7 @@ fn prune_candidates(candidates: &mut Vec<AllocCandidate>, ctx: &Context) {
 fn compute_candidate_live_in_and_defining_blocks(
     ctx: &Context,
     cand: &AllocCandidate,
+    operation_order: &FxHashMap<Ptr<Operation>, usize>,
 ) -> (FxHashSet<Ptr<BasicBlock>>, FxHashSet<Ptr<BasicBlock>>) {
     let ptr = cand.alloc_info.ptr;
 
@@ -202,43 +203,45 @@ fn compute_candidate_live_in_and_defining_blocks(
     let mut live_in: FxHashSet<Ptr<BasicBlock>> = FxHashSet::default();
     let mut live_in_worklist: Vec<Ptr<BasicBlock>> = Vec::new();
 
-    // Compute blocks that contain uses of this pointer.
-    let mut user_blocks: FxHashSet<Ptr<BasicBlock>> = FxHashSet::default();
-    for u in ptr.uses(ctx) {
-        if let Some(block) = u.user_op().deref(ctx).get_parent_block() {
-            user_blocks.insert(block);
+    // Inspect only actual users of the candidate pointer. The previous code
+    // rescanned every operation in a user block for every allocation, which is
+    // quadratic for generated straight-line kernels with thousands of locals.
+    let mut seen_users = FxHashSet::default();
+    let mut block_anchors: FxHashMap<Ptr<BasicBlock>, (Option<usize>, Option<usize>)> =
+        FxHashMap::default();
+    for r#use in ptr.uses(ctx) {
+        let user = r#use.user_op();
+        if !seen_users.insert(user) {
+            continue;
+        }
+        let Some(block) = user.deref(ctx).get_parent_block() else {
+            continue;
+        };
+        let order = operation_order[&user];
+        let user_obj = Operation::get_op_dyn(user, ctx);
+        let promotable = op_cast::<dyn PromotableOpInterface>(user_obj.as_ref())
+            .expect("Candidate users were pruned to promotable operations");
+        let anchors = block_anchors.entry(block).or_default();
+        match promotable.promotion_kind(ctx, &cand.alloc_info) {
+            PromotableOpKind::Load | PromotableOpKind::EliminatableUse => {
+                anchors.0 = Some(anchors.0.map_or(order, |current| current.min(order)));
+            }
+            PromotableOpKind::Store(_) => {
+                anchors.1 = Some(anchors.1.map_or(order, |current| current.min(order)));
+            }
+            PromotableOpKind::NonPromotableUse => {
+                unreachable!("Candidate users were pruned when promotion_kind was non-promotable")
+            }
         }
     }
 
     // A block is a defining block if it has any store to this candidate.
-    // A block seeds liveness if it has a load/eliminatable use before the first store.
-    for block in user_blocks {
-        let mut has_store = false;
-        let mut load_before_store = false;
-        for op in block.deref(ctx).iter(ctx) {
-            let op_obj = Operation::get_op_dyn(op, ctx);
-            let Some(op_promotable) = op_cast::<dyn PromotableOpInterface>(op_obj.as_ref()) else {
-                continue;
-            };
-            match op_promotable.promotion_kind(ctx, &cand.alloc_info) {
-                PromotableOpKind::Load | PromotableOpKind::EliminatableUse => {
-                    if !has_store {
-                        load_before_store = true;
-                    }
-                }
-                PromotableOpKind::Store(_) => {
-                    has_store = true;
-                }
-                PromotableOpKind::NonPromotableUse => {
-                    // Filtered by prune_candidates.
-                }
-            }
-        }
-
-        if has_store {
+    // A block seeds liveness if its first load precedes its first store.
+    for (block, (first_load, first_store)) in block_anchors {
+        if first_store.is_some() {
             defining_blocks.insert(block);
         }
-        if load_before_store {
+        if first_load.is_some_and(|load| first_store.is_none_or(|store| load < store)) {
             live_in_worklist.push(block);
         }
     }
@@ -528,11 +531,17 @@ pub fn mem2reg(root: Ptr<Operation>, ctx: &mut Context) -> Result<OptStatus> {
         let df_map = DomFrontierMap::new(ctx, &region, &dom_tree);
 
         // Compute liveness and phi-placement per candidate.
+        let mut operation_order: FxHashMap<Ptr<Operation>, usize> = FxHashMap::default();
+        for block in region.deref(ctx).iter(ctx) {
+            for (order, op) in block.deref(ctx).iter(ctx).enumerate() {
+                operation_order.insert(op, order);
+            }
+        }
         let mut phi_blocks: FxHashMap<Value, FxHashSet<Ptr<BasicBlock>>> = FxHashMap::default();
         for cand in alloc_candidates.iter() {
             let ptr = cand.alloc_info.ptr;
             let (live_in, defining_blocks) =
-                compute_candidate_live_in_and_defining_blocks(ctx, cand);
+                compute_candidate_live_in_and_defining_blocks(ctx, cand, &operation_order);
             let candidate_phi_blocks =
                 compute_candidate_phi_blocks(&df_map, &live_in, &defining_blocks);
             phi_blocks.insert(ptr, candidate_phi_blocks);
