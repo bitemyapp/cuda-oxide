@@ -1974,6 +1974,18 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
+        "cuda_device::mma::mma_m16n8k32_u8" => Ok(Some(intrinsics::mma::emit_mma_m16n8k32_u8(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
 
         // =================================================================
         // Thread Block Clusters (from intrinsics::cluster) - sm_90+

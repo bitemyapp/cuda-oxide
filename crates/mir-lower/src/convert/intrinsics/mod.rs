@@ -77,6 +77,7 @@ pub mod cluster;
 pub mod common;
 pub mod debug;
 pub mod mbarrier;
+pub mod mma;
 pub mod stmatrix;
 pub mod tcgen05;
 pub mod tma;
