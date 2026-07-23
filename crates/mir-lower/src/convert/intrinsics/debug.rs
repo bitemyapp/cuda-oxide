@@ -119,6 +119,25 @@ pub(crate) fn convert_breakpoint(
     Ok(())
 }
 
+pub(crate) fn convert_enable_smem_spilling(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let void_ty = llvm_types::VoidType::get(ctx);
+    inline_asm_convergent(
+        ctx,
+        rewriter,
+        void_ty.into(),
+        vec![],
+        ".pragma \\22enable_smem_spilling\\22;",
+        "~{memory}",
+    );
+    rewriter.erase_operation(ctx, op);
+    Ok(())
+}
+
 pub(crate) fn convert_pm_event(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,

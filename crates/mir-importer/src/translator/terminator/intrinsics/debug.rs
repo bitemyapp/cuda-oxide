@@ -18,8 +18,8 @@ use super::super::helpers::{emit_goto, emit_store_result_and_goto};
 use crate::error::{TranslationErr, TranslationResult};
 use crate::translator::values::ValueMap;
 use dialect_nvvm::ops::{
-    BreakpointOp, PmEventOp, ReadPtxSregClock64Op, ReadPtxSregClockOp, ReadPtxSregGlobaltimerOp,
-    TrapOp, VprintfOp,
+    BreakpointOp, EnableSmemSpillingOp, PmEventOp, ReadPtxSregClock64Op, ReadPtxSregClockOp,
+    ReadPtxSregGlobaltimerOp, TrapOp, VprintfOp,
 };
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{IntegerType, Signedness};
@@ -285,6 +285,43 @@ pub fn emit_breakpoint(
         input_err!(
             loc.clone(),
             TranslationErr::unsupported("breakpoint call without target block".to_string(),)
+        )
+    }
+}
+
+/// Emits the CUDA 13.0+ shared-memory spilling pragma.
+pub fn emit_enable_smem_spilling(
+    ctx: &mut Context,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    let pragma_op = Operation::new(
+        ctx,
+        EnableSmemSpillingOp::get_concrete_op_info(),
+        vec![],
+        vec![],
+        vec![],
+        0,
+    );
+    pragma_op.deref_mut(ctx).set_loc(loc.clone());
+
+    if let Some(prev) = prev_op {
+        pragma_op.insert_after(ctx, prev);
+    } else {
+        pragma_op.insert_at_front(block_ptr, ctx);
+    }
+
+    if let Some(target_idx) = target {
+        Ok(emit_goto(ctx, *target_idx, pragma_op, block_map, loc))
+    } else {
+        input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(
+                "enable_smem_spilling call without target block".to_string()
+            )
         )
     }
 }

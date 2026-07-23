@@ -239,6 +239,22 @@ impl BreakpointOp {
     }
 }
 
+/// Enable CUDA 13.0+ shared-memory register spilling for the current kernel.
+#[pliron_op(
+    name = "nvvm.enable_smem_spilling",
+    format,
+    verifier = "succ",
+    interfaces = [NOpdsInterface<0>, NResultsInterface<0>],
+)]
+pub struct EnableSmemSpillingOp;
+
+impl EnableSmemSpillingOp {
+    /// Wrap an existing operation pointer.
+    pub fn new(op: Ptr<Operation>) -> Self {
+        EnableSmemSpillingOp { op }
+    }
+}
+
 // =============================================================================
 // Profiler Operations
 // =============================================================================
@@ -398,6 +414,8 @@ pub(super) fn register(ctx: &mut Context) {
     TrapOp::register(ctx);
     // Debugging
     BreakpointOp::register(ctx);
+    // Compilation tuning
+    EnableSmemSpillingOp::register(ctx);
     // Profiler
     PmEventOp::register(ctx);
     // Printf

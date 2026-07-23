@@ -1962,6 +1962,11 @@ fn try_dispatch_intrinsic(
         "cuda_device::debug::breakpoint" => Ok(Some(intrinsics::debug::emit_breakpoint(
             ctx, target, block_ptr, prev_op, block_map, loc,
         )?)),
+        "cuda_device::debug::enable_smem_spilling" => {
+            Ok(Some(intrinsics::debug::emit_enable_smem_spilling(
+                ctx, target, block_ptr, prev_op, block_map, loc,
+            )?))
+        }
         "cuda_device::debug::__gpu_vprintf" => Ok(Some(intrinsics::debug::emit_vprintf(
             ctx,
             body,

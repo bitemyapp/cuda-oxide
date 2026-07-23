@@ -42,9 +42,9 @@ use dialect_nvvm::ops::{
     CpAsyncBulkTensorG2sTile3dOp, CpAsyncBulkTensorG2sTile4dOp, CpAsyncBulkTensorG2sTile5dOp,
     CpAsyncBulkTensorS2gTile1dOp, CpAsyncBulkTensorS2gTile2dOp, CpAsyncBulkTensorS2gTile3dOp,
     CpAsyncBulkTensorS2gTile4dOp, CpAsyncBulkTensorS2gTile5dOp, CpAsyncBulkWaitGroupOp,
-    CpAsyncBulkWaitGroupReadOp, CvtF32x2Bf16x2Op, DsmemReadU32Op, FenceProxyAsyncSharedCtaOp,
-    MapaSharedClusterOp, MatchAllSyncI32Op, MatchAllSyncI64Op, MatchAnySyncI32Op,
-    MatchAnySyncI64Op, MbarrierArriveClusterOp, MbarrierArriveExpectTxSharedOp,
+    CpAsyncBulkWaitGroupReadOp, CvtF32x2Bf16x2Op, DsmemReadU32Op, EnableSmemSpillingOp,
+    FenceProxyAsyncSharedCtaOp, MapaSharedClusterOp, MatchAllSyncI32Op, MatchAllSyncI64Op,
+    MatchAnySyncI32Op, MatchAnySyncI64Op, MbarrierArriveClusterOp, MbarrierArriveExpectTxSharedOp,
     MbarrierArriveSharedOp, MbarrierInitSharedOp, MbarrierInvalSharedOp, MbarrierTestWaitSharedOp,
     MbarrierTryWaitParitySharedOp, MbarrierTryWaitSharedOp, NanosleepOp, NvvmAtomicCmpxchgOp,
     NvvmAtomicLoadOp, NvvmAtomicRmwOp, NvvmAtomicStoreOp, PmEventOp, ReadPtxSregClock64Op,
@@ -1213,6 +1213,23 @@ impl MirToLlvmConversion for BreakpointOp {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::intrinsics::debug::convert_breakpoint(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for EnableSmemSpillingOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::debug::convert_enable_smem_spilling(
             ctx,
             rewriter,
             self.get_operation(),

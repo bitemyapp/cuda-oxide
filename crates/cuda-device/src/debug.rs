@@ -193,6 +193,17 @@ pub fn breakpoint() {
     unreachable!("breakpoint called outside CUDA kernel context")
 }
 
+/// Ask CUDA 13.0+ whole-program PTXAS to place register spills in shared
+/// memory before falling back to local memory.
+///
+/// Call this once at the beginning of a kernel with explicit launch bounds.
+/// The directive is invalid for kernels using dynamic shared memory or
+/// separate device-code compilation.
+#[inline(never)]
+pub fn enable_smem_spilling() {
+    unreachable!("enable_smem_spilling called outside CUDA kernel context")
+}
+
 /// Signal the NVIDIA profiler at a specific point.
 ///
 /// Triggers a profiler event that can be viewed in Nsight Systems or
