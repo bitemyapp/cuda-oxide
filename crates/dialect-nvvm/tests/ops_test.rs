@@ -4,10 +4,11 @@
  */
 
 use dialect_nvvm::ops::{
-    Barrier0Op, ReadPtxSregLaneIdOp, ReadPtxSregTidXOp, ThreadfenceBlockOp, ThreadfenceOp,
-    ThreadfenceSystemOp,
+    Barrier0Op, LduGlobalU64Op, ReadPtxSregLaneIdOp, ReadPtxSregTidXOp, ThreadfenceBlockOp,
+    ThreadfenceOp, ThreadfenceSystemOp,
 };
 use pliron::{
+    basic_block::BasicBlock,
     builtin::types::{IntegerType, Signedness},
     common_traits::Verify,
     context::Context,
@@ -105,4 +106,23 @@ fn test_sync_ops_construct_and_verify() {
         0,
     );
     assert!(ThreadfenceSystemOp::new(system_fence).verify(&ctx).is_ok());
+}
+
+#[test]
+fn test_uniform_load_constructs_and_verifies() {
+    let mut ctx = Context::new();
+    dialect_nvvm::register(&mut ctx);
+
+    let i64_ty = IntegerType::get(&mut ctx, 64, Signedness::Signless);
+    let block = BasicBlock::new(&mut ctx, None, vec![i64_ty.into()]);
+    let address = block.deref(&ctx).get_argument(0);
+    let load = Operation::new(
+        &mut ctx,
+        LduGlobalU64Op::get_concrete_op_info(),
+        vec![i64_ty.into()],
+        vec![address],
+        vec![],
+        0,
+    );
+    assert!(LduGlobalU64Op::new(load).verify(&ctx).is_ok());
 }

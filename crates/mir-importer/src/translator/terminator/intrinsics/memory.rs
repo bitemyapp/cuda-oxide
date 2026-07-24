@@ -14,7 +14,7 @@ use crate::translator::values::ValueMap;
 use dialect_mir::attributes::MirCastKindAttr;
 use dialect_mir::ops::MirCastOp;
 use dialect_nvvm::ops::{
-    CvtF32x2Bf16x2Op, StmatrixM8n8X2Op, StmatrixM8n8X2TransOp, StmatrixM8n8X4Op,
+    CvtF32x2Bf16x2Op, LduGlobalU64Op, StmatrixM8n8X2Op, StmatrixM8n8X2TransOp, StmatrixM8n8X4Op,
     StmatrixM8n8X4TransOp,
 };
 use pliron::basic_block::BasicBlock;
@@ -26,6 +26,70 @@ use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::r#type::Typed;
 use rustc_public::mir;
+
+/// Emit `uniform::load_u64(ptr)`: a read-only load from an address common to every warp lane.
+pub fn emit_ldu_global_u64(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    if args.len() != 1 {
+        return input_err!(
+            loc.clone(),
+            TranslationErr::unsupported(format!(
+                "uniform::load_u64 expects one pointer argument, got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let (ptr, last_op) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+    let u64_type = IntegerType::get(ctx, 64, Signedness::Unsigned);
+    let op = Operation::new(
+        ctx,
+        LduGlobalU64Op::get_concrete_op_info(),
+        vec![u64_type.to_ptr()],
+        vec![ptr],
+        vec![],
+        0,
+    );
+    op.deref_mut(ctx).set_loc(loc.clone());
+    if let Some(prev) = last_op {
+        op.insert_after(ctx, prev);
+    } else {
+        op.insert_at_front(block_ptr, ctx);
+    }
+
+    let result = op.deref(ctx).get_result(0);
+    emit_store_result_and_goto(
+        ctx,
+        destination,
+        result,
+        target,
+        block_ptr,
+        op,
+        value_map,
+        block_map,
+        loc,
+        "uniform::load_u64 call without target block",
+    )
+}
+
 /// Emits `stmatrix.m8n8.x4`: Warp-cooperative matrix store (4 tiles).
 ///
 /// Stores 4 matrix tiles (32 columns) to shared memory using the warp-cooperative

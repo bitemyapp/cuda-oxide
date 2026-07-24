@@ -362,6 +362,91 @@ fn test_threadfence_system_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+#[test]
+fn test_uniform_u64_load_lowers_to_ldu_inline_ptx() -> Result<(), anyhow::Error> {
+    let mut ctx = Context::new();
+    dialect_llvm::register(&mut ctx);
+    dialect_mir::register(&mut ctx);
+    dialect_nvvm::register(&mut ctx);
+    mir_lower::register(&mut ctx);
+
+    let module = ModuleOp::new(&mut ctx, "test_module".try_into().unwrap());
+    let module_ptr = module.get_operation();
+    let ptr_ty = dialect_llvm::types::PointerType::get(&mut ctx, 0);
+    let i64_ty = pliron::builtin::types::IntegerType::get(
+        &mut ctx,
+        64,
+        pliron::builtin::types::Signedness::Signless,
+    );
+    let func_ty = pliron::builtin::types::FunctionType::get(&mut ctx, vec![ptr_ty.into()], vec![]);
+    let func_op_ptr = Operation::new(
+        &mut ctx,
+        mir::MirFuncOp::get_concrete_op_info(),
+        vec![],
+        vec![],
+        vec![],
+        1,
+    );
+    let func = mir::MirFuncOp::new(
+        &mut ctx,
+        func_op_ptr,
+        pliron::builtin::attributes::TypeAttr::new(func_ty.into()),
+    );
+    func.set_symbol_name(&mut ctx, "uniform_load_kernel".try_into().unwrap());
+
+    let region = func.get_operation().deref(&ctx).get_region(0);
+    let block = pliron::basic_block::BasicBlock::new(&mut ctx, None, vec![ptr_ty.into()]);
+    block.insert_at_back(region, &ctx);
+    let address = block.deref(&ctx).get_argument(0);
+    let load = Operation::new(
+        &mut ctx,
+        nvvm::LduGlobalU64Op::get_concrete_op_info(),
+        vec![i64_ty.into()],
+        vec![address],
+        vec![],
+        0,
+    );
+    load.insert_at_back(block, &ctx);
+    let ret = Operation::new(
+        &mut ctx,
+        mir::MirReturnOp::get_concrete_op_info(),
+        vec![],
+        vec![],
+        vec![],
+        0,
+    );
+    ret.insert_at_back(block, &ctx);
+
+    let module_region = module.get_operation().deref(&ctx).get_region(0);
+    let module_block = module_region.deref(&ctx).iter(&ctx).next().unwrap();
+    func.get_operation().insert_at_back(module_block, &ctx);
+    mir_lower::lower_mir_to_llvm(&mut ctx, module_ptr).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let mut found_ldu = false;
+    for op in module_block.deref(&ctx).iter(&ctx) {
+        let Some(func_op) = Operation::get_op::<llvm::FuncOp>(op, &ctx) else {
+            continue;
+        };
+        if func_op.get_symbol_name(&ctx).to_string() != "uniform_load_kernel" {
+            continue;
+        }
+        let func_region = func_op.get_operation().deref(&ctx).get_region(0);
+        for func_block in func_region.deref(&ctx).iter(&ctx) {
+            for body_op in func_block.deref(&ctx).iter(&ctx) {
+                if let Some(inline_asm) = Operation::get_op::<llvm::InlineAsmOp>(body_op, &ctx)
+                    && inline_asm.asm_template(&ctx) == "ldu.global.u64 $0, [$1];"
+                {
+                    assert_eq!(inline_asm.constraints(&ctx), "=l,l,~{memory}");
+                    assert!(inline_asm.is_convergent(&ctx));
+                    found_ldu = true;
+                }
+            }
+        }
+    }
+    assert!(found_ldu, "expected ldu.global.u64 inline PTX");
+    Ok(())
+}
+
 /// Regression cover for the per-call-site address-space coercion pass.
 ///
 /// When a caller passes a pointer in one address space to a callee whose

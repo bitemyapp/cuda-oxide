@@ -43,7 +43,7 @@ use dialect_nvvm::ops::{
     CpAsyncBulkTensorS2gTile1dOp, CpAsyncBulkTensorS2gTile2dOp, CpAsyncBulkTensorS2gTile3dOp,
     CpAsyncBulkTensorS2gTile4dOp, CpAsyncBulkTensorS2gTile5dOp, CpAsyncBulkWaitGroupOp,
     CpAsyncBulkWaitGroupReadOp, CvtF32x2Bf16x2Op, DsmemReadU32Op, FenceProxyAsyncSharedCtaOp,
-    MapaSharedClusterOp, MatchAllSyncI32Op, MatchAllSyncI64Op, MatchAnySyncI32Op,
+    LduGlobalU64Op, MapaSharedClusterOp, MatchAllSyncI32Op, MatchAllSyncI64Op, MatchAnySyncI32Op,
     MatchAnySyncI64Op, MbarrierArriveClusterOp, MbarrierArriveExpectTxSharedOp,
     MbarrierArriveSharedOp, MbarrierInitSharedOp, MbarrierInvalSharedOp, MbarrierTestWaitSharedOp,
     MbarrierTryWaitParitySharedOp, MbarrierTryWaitSharedOp, MmaM16n8k32U8Op, NanosleepOp,
@@ -1085,6 +1085,23 @@ impl MirToLlvmConversion for Barrier0Op {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::intrinsics::basic::convert_barrier0(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for LduGlobalU64Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::basic::convert_ldu_global_u64(
             ctx,
             rewriter,
             self.get_operation(),
