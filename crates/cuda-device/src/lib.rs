@@ -27,6 +27,7 @@ pub mod shared;
 pub mod tcgen05;
 pub mod thread;
 pub mod tma;
+pub mod uniform;
 pub mod warp;
 pub mod wgmma;
 

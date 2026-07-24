@@ -52,6 +52,33 @@ pub(crate) fn convert_barrier0(
     Ok(())
 }
 
+/// Convert a warp-uniform read-only global `u64` load to PTX `ldu.global.u64`.
+pub(crate) fn convert_ldu_global_u64(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    _operands_info: &OperandsInfo,
+) -> Result<()> {
+    let operands: Vec<_> = op.deref(ctx).operands().collect();
+    if operands.len() != 1 {
+        return pliron::input_err_noloc!(
+            "nvvm.ldu_global_u64 requires one address operand, got {}",
+            operands.len()
+        );
+    }
+    let i64_ty = IntegerType::get(ctx, 64, Signedness::Signless);
+    let inline_asm = inline_asm_convergent(
+        ctx,
+        rewriter,
+        i64_ty.into(),
+        operands,
+        "ldu.global.u64 $0, [$1];",
+        "=l,l,~{memory}",
+    );
+    rewriter.replace_operation(ctx, op, inline_asm);
+    Ok(())
+}
+
 fn convert_membar(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,

@@ -2715,6 +2715,18 @@ fn try_dispatch_intrinsic(
         // Memory Operations (from intrinsics::memory)
         // Note: stmatrix and cvt are under cuda_device::tcgen05::
         // =================================================================
+        "cuda_device::uniform::load_u64" => Ok(Some(intrinsics::memory::emit_ldu_global_u64(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
         "cuda_device::tcgen05::stmatrix_m8n8_x4" => {
             Ok(Some(intrinsics::memory::emit_stmatrix_m8n8_x4(
                 ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
