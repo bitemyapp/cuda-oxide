@@ -63,7 +63,7 @@ pub mod stream;
 /// CUDA Virtual Memory Management (VMM) for physical alloc, VA reservation, and mapping.
 pub mod vmm;
 
-pub use context::CudaContext;
+pub use context::{CudaContext, PersistingL2CacheLimits};
 /// Raw CUDA driver bindings re-exported for direct access when needed.
 pub use cuda_bindings as sys;
 pub use device_buffer::{DeviceBuffer, DeviceCopy};

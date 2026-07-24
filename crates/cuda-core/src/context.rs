@@ -60,6 +60,23 @@ unsafe impl Send for CudaContext {}
 /// See [`Send`] impl.
 unsafe impl Sync for CudaContext {}
 
+/// Device limits governing persisting-L2 access-policy windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PersistingL2CacheLimits {
+    /// Maximum number of L2 bytes that the context may reserve for persisting lines.
+    pub max_persisting_l2_cache_bytes: usize,
+    /// Maximum number of bytes covered by one stream access-policy window.
+    pub max_access_policy_window_bytes: usize,
+}
+
+fn nonnegative_device_attribute(value: c_int) -> usize {
+    usize::try_from(value).unwrap_or(0)
+}
+
+fn clamp_persisting_l2_cache_bytes(requested_bytes: usize, maximum_bytes: usize) -> usize {
+    requested_bytes.min(maximum_bytes)
+}
+
 /// Releases the primary context on drop.
 ///
 /// Binds the context to the current thread first (required by
@@ -257,6 +274,58 @@ impl CudaContext {
         }
     }
 
+    /// Queries the device limits used by persisting-L2 stream access-policy windows.
+    pub fn persisting_l2_cache_limits(&self) -> Result<PersistingL2CacheLimits, DriverError> {
+        self.bind_to_thread()?;
+        let mut max_persisting = MaybeUninit::uninit();
+        let mut max_window = MaybeUninit::uninit();
+        unsafe {
+            cuda_bindings::cuDeviceGetAttribute(
+                max_persisting.as_mut_ptr(),
+                cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
+                self.cu_device,
+            )
+            .result()?;
+            cuda_bindings::cuDeviceGetAttribute(
+                max_window.as_mut_ptr(),
+                cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                self.cu_device,
+            )
+            .result()?;
+            Ok(PersistingL2CacheLimits {
+                max_persisting_l2_cache_bytes: nonnegative_device_attribute(
+                    max_persisting.assume_init(),
+                ),
+                max_access_policy_window_bytes: nonnegative_device_attribute(
+                    max_window.assume_init(),
+                ),
+            })
+        }
+    }
+
+    /// Reserves up to `requested_bytes` of L2 for persisting access-policy lines.
+    ///
+    /// The request is clamped to
+    /// [`PersistingL2CacheLimits::max_persisting_l2_cache_bytes`]. A request of
+    /// zero disables the reservation. The applied size is returned.
+    pub fn set_persisting_l2_cache_size(
+        &self,
+        requested_bytes: usize,
+    ) -> Result<usize, DriverError> {
+        let limits = self.persisting_l2_cache_limits()?;
+        let applied_bytes =
+            clamp_persisting_l2_cache_bytes(requested_bytes, limits.max_persisting_l2_cache_bytes);
+        self.bind_to_thread()?;
+        unsafe {
+            cuda_bindings::cuCtxSetLimit(
+                cuda_bindings::CUlimit_enum_CU_LIMIT_PERSISTING_L2_CACHE_SIZE,
+                applied_bytes,
+            )
+            .result()?;
+        }
+        Ok(applied_bytes)
+    }
+
     /// Atomically reads and clears the sticky error state.
     ///
     /// Returns `Ok(())` if no error was recorded, or the stored
@@ -280,5 +349,24 @@ impl CudaContext {
         if let Err(err) = result {
             self.error_state.store(err.0, Ordering::Relaxed)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_persisting_l2_cache_bytes, nonnegative_device_attribute};
+
+    #[test]
+    fn persisting_l2_size_is_clamped_to_device_limit() {
+        assert_eq!(clamp_persisting_l2_cache_bytes(64, 80), 64);
+        assert_eq!(clamp_persisting_l2_cache_bytes(96, 80), 80);
+        assert_eq!(clamp_persisting_l2_cache_bytes(0, 80), 0);
+    }
+
+    #[test]
+    fn negative_device_attribute_is_treated_as_unsupported() {
+        assert_eq!(nonnegative_device_attribute(-1), 0);
+        assert_eq!(nonnegative_device_attribute(0), 0);
+        assert_eq!(nonnegative_device_attribute(128), 128);
     }
 }

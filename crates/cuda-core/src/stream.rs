@@ -25,8 +25,10 @@
 //! Rust `async` futures.
 
 use crate::context::CudaContext;
+use crate::device_buffer::DeviceBuffer;
 use crate::error::{DriverError, IntoResult};
 use crate::event::CudaEvent;
+use anyhow::{Result as AnyhowResult, bail};
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -52,6 +54,14 @@ pub struct CudaStream {
 unsafe impl Send for CudaStream {}
 /// See [`Send`] impl.
 unsafe impl Sync for CudaStream {}
+
+fn clamp_access_policy_window_bytes(
+    requested_bytes: usize,
+    allocation_bytes: usize,
+    maximum_bytes: usize,
+) -> usize {
+    requested_bytes.min(allocation_bytes).min(maximum_bytes)
+}
 
 /// Destroys the underlying `CUstream` on drop and decrements the context's
 /// live stream count.
@@ -85,6 +95,66 @@ impl CudaStream {
     pub fn synchronize(&self) -> Result<(), DriverError> {
         self.ctx.bind_to_thread()?;
         unsafe { cuda_bindings::cuStreamSynchronize(self.cu_stream) }.result()
+    }
+
+    /// Applies a persisting-L2 access-policy window over the start of `buffer`.
+    ///
+    /// `requested_bytes` is clamped to both the allocation size and the
+    /// device's maximum access-policy window. `hit_ratio` must be finite and
+    /// in `(0, 1]`. Lines selected as hits receive the `PERSISTING` policy;
+    /// misses receive `STREAMING`, leaving the reserved L2 capacity available
+    /// to the selected subset. The applied window size is returned.
+    pub fn set_persisting_access_policy<T>(
+        &self,
+        buffer: &DeviceBuffer<T>,
+        requested_bytes: usize,
+        hit_ratio: f32,
+    ) -> AnyhowResult<usize> {
+        if self.ctx.as_ref() != buffer.context().as_ref() {
+            bail!("access-policy buffer belongs to a different CUDA context");
+        }
+        if !hit_ratio.is_finite() || !(0.0 < hit_ratio && hit_ratio <= 1.0) {
+            bail!("access-policy hit ratio must be finite and in (0, 1], got {hit_ratio}");
+        }
+        let limits = self.ctx.persisting_l2_cache_limits()?;
+        let applied_bytes = clamp_access_policy_window_bytes(
+            requested_bytes,
+            buffer.num_bytes(),
+            limits.max_access_policy_window_bytes,
+        );
+        if applied_bytes == 0 {
+            bail!(
+                "access-policy window is empty after clamping requested={requested_bytes}, allocation={}, device_max={}",
+                buffer.num_bytes(),
+                limits.max_access_policy_window_bytes
+            );
+        }
+
+        self.ctx.bind_to_thread()?;
+        let window = cuda_bindings::CUaccessPolicyWindow {
+            base_ptr: buffer.cu_deviceptr() as *mut c_void,
+            num_bytes: applied_bytes,
+            hitRatio: hit_ratio,
+            hitProp: cuda_bindings::CUaccessProperty_enum_CU_ACCESS_PROPERTY_PERSISTING,
+            missProp: cuda_bindings::CUaccessProperty_enum_CU_ACCESS_PROPERTY_STREAMING,
+        };
+        let mut value: cuda_bindings::CUstreamAttrValue = unsafe { std::mem::zeroed() };
+        unsafe {
+            // CUstreamAttrValue aliases CUlaunchAttributeValue, whose first
+            // union member is CUaccessPolicyWindow. cuda-bindings deliberately
+            // keeps the union opaque for CUDA 13.2 compatibility.
+            std::ptr::write(
+                std::ptr::addr_of_mut!(value).cast::<cuda_bindings::CUaccessPolicyWindow>(),
+                window,
+            );
+            cuda_bindings::cuStreamSetAttribute(
+                self.cu_stream,
+                cuda_bindings::CUlaunchAttributeID_enum_CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+                std::ptr::addr_of!(value),
+            )
+            .result()?;
+        }
+        Ok(applied_bytes)
     }
 
     /// Creates a new non-blocking stream that waits on all prior work in
@@ -201,5 +271,18 @@ impl CudaStream {
             let callback: Box<F> = unsafe { Box::from_raw(callback as *mut F) };
             callback();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_access_policy_window_bytes;
+
+    #[test]
+    fn access_policy_window_is_clamped_to_all_bounds() {
+        assert_eq!(clamp_access_policy_window_bytes(32, 64, 128), 32);
+        assert_eq!(clamp_access_policy_window_bytes(96, 64, 128), 64);
+        assert_eq!(clamp_access_policy_window_bytes(256, 512, 128), 128);
+        assert_eq!(clamp_access_policy_window_bytes(1, 0, 128), 0);
     }
 }
