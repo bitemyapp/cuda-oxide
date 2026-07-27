@@ -28,6 +28,24 @@ impl MulModP64PartialOp {
     }
 }
 
+/// Fixed-modulus dot product with two to five product terms and one canonical result.
+///
+/// The importer validates the dynamic operand count (`acc` plus two operands per term).
+#[pliron_op(
+    name = "nvvm.dot_mod_p64",
+    format,
+    verifier = "succ",
+    interfaces = [NResultsInterface<1>],
+)]
+pub struct DotModP64Op;
+
+impl DotModP64Op {
+    pub fn new(op: Ptr<Operation>) -> Self {
+        Self { op }
+    }
+}
+
 pub(super) fn register(ctx: &mut Context) {
     MulModP64PartialOp::register(ctx);
+    DotModP64Op::register(ctx);
 }

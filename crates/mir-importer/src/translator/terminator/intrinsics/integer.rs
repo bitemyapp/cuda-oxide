@@ -9,7 +9,7 @@ use super::super::helpers::{emit_store_result_and_goto, insert_op};
 use crate::error::{TranslationErr, TranslationResult};
 use crate::translator::rvalue;
 use crate::translator::values::ValueMap;
-use dialect_nvvm::ops::MulModP64PartialOp;
+use dialect_nvvm::ops::{DotModP64Op, MulModP64PartialOp};
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
@@ -83,5 +83,62 @@ pub fn emit_mul_mod_p64_partial(
         block_map,
         loc,
         "mul_mod_p64_partial call without target block",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_dot_mod_p64(
+    ctx: &mut Context,
+    body: &mir::Body,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    if !matches!(args.len(), 5 | 7 | 9 | 11) {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported(format!(
+                "dot_mod_p64 expects 5, 7, 9, or 11 arguments, got {}",
+                args.len()
+            ))
+        );
+    }
+
+    let mut operands = Vec::with_capacity(args.len());
+    let mut after = prev_op;
+    for arg in args {
+        let (value, next) =
+            rvalue::translate_operand(ctx, body, arg, value_map, block_ptr, after, loc.clone())?;
+        operands.push(value);
+        after = next;
+    }
+    let i64_type = IntegerType::get(ctx, 64, Signedness::Unsigned);
+    let op = Operation::new(
+        ctx,
+        DotModP64Op::get_concrete_op_info(),
+        vec![i64_type.to_ptr()],
+        operands,
+        vec![],
+        0,
+    );
+    op.deref_mut(ctx).set_loc(loc.clone());
+    insert_op(ctx, op, block_ptr, after);
+    let result = op.deref(ctx).get_result(0);
+    emit_store_result_and_goto(
+        ctx,
+        destination,
+        result,
+        target,
+        block_ptr,
+        op,
+        value_map,
+        block_map,
+        loc,
+        "dot_mod_p64 call without target block",
     )
 }

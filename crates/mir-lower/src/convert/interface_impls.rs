@@ -69,7 +69,7 @@ use dialect_nvvm::ops::{
     WgmmaFenceSyncAlignedOp, WgmmaMakeSmemDescOp, WgmmaMmaM64N64K16F32Bf16Op,
     WgmmaWaitGroupSyncAlignedOp,
 };
-use dialect_nvvm::ops::MulModP64PartialOp;
+use dialect_nvvm::ops::{DotModP64Op, MulModP64PartialOp};
 
 // ---- Arithmetic ops --------------------------------------------------------
 
@@ -82,6 +82,23 @@ impl MirToLlvmConversion for MulModP64PartialOp {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::intrinsics::integer::convert_mul_mod_p64_partial(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for DotModP64Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::integer::convert_dot_mod_p64(
             ctx,
             rewriter,
             self.get_operation(),
