@@ -1551,6 +1551,37 @@ fn try_dispatch_intrinsic(
             )?))
         }
 
+        "cuda_device::integer::mul_mod_p64_partial" => {
+            Ok(Some(intrinsics::integer::emit_mul_mod_p64_partial(
+                ctx,
+                body,
+                args,
+                destination,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
+
+        "cuda_device::integer::dot2_mod_p64"
+        | "cuda_device::integer::dot3_mod_p64"
+        | "cuda_device::integer::dot4_mod_p64"
+        | "cuda_device::integer::dot5_mod_p64" => Ok(Some(intrinsics::integer::emit_dot_mod_p64(
+            ctx,
+            body,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?)),
+
         // =================================================================
         // Thread/Block Position Intrinsics
         // Support both re-exported (cuda_device::) and full paths (cuda_device::thread::)

@@ -42,6 +42,7 @@ pub mod cluster;
 pub mod debug;
 pub mod float_math;
 pub mod indexing;
+pub mod integer;
 pub mod memory;
 pub mod mma;
 pub mod saturating;
