@@ -63,7 +63,9 @@ pub mod stream;
 /// CUDA Virtual Memory Management (VMM) for physical alloc, VA reservation, and mapping.
 pub mod vmm;
 
-pub use context::{ContextLimit, CudaContext, StreamPriorityRange, SyncPolicy};
+pub use context::{
+    ContextLimit, CudaContext, PersistingL2CacheLimits, StreamPriorityRange, SyncPolicy,
+};
 /// Raw CUDA driver bindings re-exported for direct access when needed.
 pub use cuda_bindings as sys;
 /// `#[derive(DeviceCopy)]` macro, re-exported next to the `DeviceCopy` trait so

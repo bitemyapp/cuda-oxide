@@ -113,6 +113,15 @@ pub struct StreamPriorityRange {
     greatest: i32,
 }
 
+/// Device limits governing persisting-L2 access-policy windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PersistingL2CacheLimits {
+    /// Maximum context-wide persisting-L2 reservation, in bytes.
+    pub max_persisting_l2_cache_bytes: usize,
+    /// Maximum access-policy window that may be attached to one stream.
+    pub max_access_policy_window_bytes: usize,
+}
+
 impl StreamPriorityRange {
     /// The lowest priority, which is the numerically largest value.
     pub fn least(&self) -> i32 {
@@ -628,6 +637,18 @@ impl CudaContext {
         self.device_attribute(
             cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
         )
+    }
+
+    /// Queries the device limits used by persisting-L2 access policies.
+    pub fn persisting_l2_cache_limits(&self) -> Result<PersistingL2CacheLimits, DriverError> {
+        Ok(PersistingL2CacheLimits {
+            max_persisting_l2_cache_bytes: self.device_attribute(
+                cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
+            )? as usize,
+            max_access_policy_window_bytes: self.device_attribute(
+                cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+            )? as usize,
+        })
     }
 
     /// Reads a device limit off this context.

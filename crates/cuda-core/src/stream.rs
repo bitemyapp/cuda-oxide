@@ -25,6 +25,7 @@
 //! Rust `async` futures.
 
 use crate::context::CudaContext;
+use crate::device_buffer::DeviceBuffer;
 use crate::error::{DriverError, IntoResult};
 use crate::event::CudaEvent;
 use std::ffi::c_void;
@@ -102,6 +103,90 @@ impl CudaStream {
     pub fn synchronize(&self) -> Result<(), DriverError> {
         self.ctx.bind_to_thread()?;
         unsafe { cuda_bindings::cuStreamSynchronize(self.cu_stream) }.result()
+    }
+
+    /// Applies a persisting-L2 access-policy window over the start of `buffer`.
+    ///
+    /// The requested byte count is clamped to both the allocation size and the
+    /// device's maximum access-policy window. `hit_ratio` must be finite and in
+    /// `0.0..=1.0`. The returned value is the window size passed to the driver.
+    ///
+    /// The buffer must belong to the same CUDA context as this stream. Reserve
+    /// persisting-L2 capacity first with
+    /// [`CudaContext::set_limit`](crate::context::CudaContext::set_limit) and
+    /// [`ContextLimit::PersistingL2CacheSize`](crate::context::ContextLimit::PersistingL2CacheSize).
+    pub fn set_persisting_access_policy<T>(
+        &self,
+        buffer: &DeviceBuffer<T>,
+        requested_bytes: usize,
+        hit_ratio: f32,
+    ) -> Result<usize, DriverError> {
+        if self.ctx.as_ref() != buffer.context().as_ref() || !valid_hit_ratio(hit_ratio) {
+            return Err(invalid_value());
+        }
+
+        let maximum_bytes = self
+            .ctx
+            .persisting_l2_cache_limits()?
+            .max_access_policy_window_bytes;
+        let applied_bytes =
+            clamp_access_policy_window_bytes(requested_bytes, buffer.num_bytes(), maximum_bytes);
+        if applied_bytes == 0 {
+            return Err(invalid_value());
+        }
+
+        self.set_access_policy_window(
+            buffer.cu_deviceptr() as *mut c_void,
+            applied_bytes,
+            hit_ratio,
+            cuda_bindings::CUaccessProperty_enum_CU_ACCESS_PROPERTY_PERSISTING,
+            cuda_bindings::CUaccessProperty_enum_CU_ACCESS_PROPERTY_STREAMING,
+        )?;
+        Ok(applied_bytes)
+    }
+
+    /// Removes this stream's access-policy window and restores normal caching.
+    pub fn clear_access_policy_window(&self) -> Result<(), DriverError> {
+        self.set_access_policy_window(
+            std::ptr::null_mut(),
+            0,
+            0.0,
+            cuda_bindings::CUaccessProperty_enum_CU_ACCESS_PROPERTY_NORMAL,
+            cuda_bindings::CUaccessProperty_enum_CU_ACCESS_PROPERTY_NORMAL,
+        )
+    }
+
+    fn set_access_policy_window(
+        &self,
+        base_ptr: *mut c_void,
+        num_bytes: usize,
+        hit_ratio: f32,
+        hit_property: cuda_bindings::CUaccessProperty,
+        miss_property: cuda_bindings::CUaccessProperty,
+    ) -> Result<(), DriverError> {
+        self.ctx.bind_to_thread()?;
+        let window = cuda_bindings::CUaccessPolicyWindow {
+            base_ptr,
+            num_bytes,
+            hitRatio: hit_ratio,
+            hitProp: hit_property,
+            missProp: miss_property,
+        };
+        let mut value: cuda_bindings::CUstreamAttrValue = unsafe { std::mem::zeroed() };
+        unsafe {
+            // CUstreamAttrValue is an opaque union in generated CUDA 13
+            // bindings. CUaccessPolicyWindow is its first member.
+            std::ptr::write(
+                std::ptr::addr_of_mut!(value).cast::<cuda_bindings::CUaccessPolicyWindow>(),
+                window,
+            );
+            cuda_bindings::cuStreamSetAttribute(
+                self.cu_stream,
+                cuda_bindings::CUlaunchAttributeID_enum_CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+                std::ptr::addr_of!(value),
+            )
+            .result()
+        }
     }
 
     /// Returns `true` when every operation enqueued on this stream has
@@ -248,5 +333,44 @@ impl CudaStream {
             let callback: Box<F> = unsafe { Box::from_raw(callback as *mut F) };
             callback();
         });
+    }
+}
+
+fn invalid_value() -> DriverError {
+    DriverError(cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_VALUE)
+}
+
+fn valid_hit_ratio(hit_ratio: f32) -> bool {
+    hit_ratio.is_finite() && (0.0..=1.0).contains(&hit_ratio)
+}
+
+fn clamp_access_policy_window_bytes(
+    requested_bytes: usize,
+    allocation_bytes: usize,
+    maximum_bytes: usize,
+) -> usize {
+    requested_bytes.min(allocation_bytes).min(maximum_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_access_policy_window_bytes, valid_hit_ratio};
+
+    #[test]
+    fn access_policy_window_is_clamped_to_every_bound() {
+        assert_eq!(clamp_access_policy_window_bytes(32, 64, 128), 32);
+        assert_eq!(clamp_access_policy_window_bytes(96, 64, 128), 64);
+        assert_eq!(clamp_access_policy_window_bytes(256, 512, 128), 128);
+        assert_eq!(clamp_access_policy_window_bytes(1, 0, 128), 0);
+    }
+
+    #[test]
+    fn access_policy_hit_ratio_must_be_a_probability() {
+        assert!(valid_hit_ratio(0.0));
+        assert!(valid_hit_ratio(1.0));
+        assert!(!valid_hit_ratio(-f32::EPSILON));
+        assert!(!valid_hit_ratio(1.0 + f32::EPSILON));
+        assert!(!valid_hit_ratio(f32::NAN));
+        assert!(!valid_hit_ratio(f32::INFINITY));
     }
 }
