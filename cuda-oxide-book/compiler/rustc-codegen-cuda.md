@@ -402,6 +402,7 @@ quiet, production-oriented build.
 | `CUDA_OXIDE_PTX_DIR`        | Override the output directory for `.ptx` files (default: next to the host binary)      |
 | `CUDA_OXIDE_TARGET`         | Override the GPU target architecture (e.g., `sm_90a` for Hopper)                       |
 | `CUDA_OXIDE_SHOW_RUSTC_MIR` | Dump the raw rustc MIR before translation to pliron (useful for debugging import bugs) |
+| `CUDA_OXIDE_ARTIFACT_ONLY`   | Omit host code for a selected device owner when building an extraction-only rlib      |
 
 These are intentionally environment variables rather than command-line flags.
 The codegen backend receives very limited information from rustc's argument

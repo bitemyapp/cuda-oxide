@@ -88,10 +88,17 @@ These are set automatically by `cargo oxide`. For manual invocations, all four a
 | `CUDA_OXIDE_SHOW_RUSTC_MIR`          | Dump raw rustc MIR                          |
 | `CUDA_OXIDE_EMIT_NVVM_IR`            | Emit NVVM IR for libNVVM                    |
 | `CUDA_OXIDE_DEVICE_CODEGEN_CRATE`    | Comma-separated device owner crate filter   |
+| `CUDA_OXIDE_ARTIFACT_ONLY`           | Omit owner host code for `.oxart` extraction |
 | `CUDA_OXIDE_DEVICE_ARCH`             | Detected GPU arch; advisory (see below)     |
 | `CUDA_OXIDE_DEBUG`                   | Device DWARF level override                 |
 | `CUDA_OXIDE_NO_FMA`                  | Disable FMA contraction (presence only)     |
 | `CUDA_OXIDE_NO_SPILL_WARN`           | Silence the register-spill warning          |
+
+`CUDA_OXIDE_ARTIFACT_ONLY` is for an intermediate library build whose
+resulting rlib is opened only to extract its `.oxart` object. The selected
+device-owning crate contains no native host implementation in that build and
+must not be linked into an executable. Dependencies and non-selected targets
+continue through the ordinary LLVM host backend.
 
 `CUDA_OXIDE_DEBUG` overrides the DWARF level rustc's `-C debuginfo` would
 imply: `0`/`off`/`none`, `1`/`line`/`lines`/`line-tables`/`line-tables-only`,

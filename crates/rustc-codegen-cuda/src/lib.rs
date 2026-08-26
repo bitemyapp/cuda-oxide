@@ -365,7 +365,7 @@ pub struct CudaCodegenBackend {
 }
 
 struct CudaOngoingCodegen {
-    host: Box<dyn Any>,
+    host: Option<Box<dyn Any>>,
     artifact_objects: Vec<PathBuf>,
 }
 
@@ -390,6 +390,12 @@ pub struct CudaCodegenConfig {
     /// When set, emit device code only for these normalized local crate names.
     /// Host code still goes through the wrapped LLVM backend for every crate.
     pub device_codegen_crates: Option<BTreeSet<String>>,
+    /// Omit host LLVM codegen for selected device-owning crates.
+    ///
+    /// This is for intermediate library builds whose rlib is opened only to
+    /// extract its `.oxart` member. Such an rlib must not be linked as a normal
+    /// host library.
+    pub artifact_only: bool,
 }
 
 impl CudaCodegenConfig {
@@ -403,6 +409,7 @@ impl CudaCodegenConfig {
     /// | `CUDA_OXIDE_DUMP_LLVM`               | `dump_llvm_dialect`      |
     /// | `CUDA_OXIDE_PTX_DIR`                 | `ptx_output_dir`         |
     /// | `CUDA_OXIDE_DEVICE_CODEGEN_CRATE`  | `device_codegen_crates`  |
+    /// | `CUDA_OXIDE_ARTIFACT_ONLY`         | `artifact_only`          |
     pub fn from_env() -> Self {
         Self {
             verbose: std::env::var("CUDA_OXIDE_VERBOSE").is_ok(),
@@ -417,6 +424,7 @@ impl CudaCodegenConfig {
                     .ok()
                     .as_deref(),
             ),
+            artifact_only: std::env::var_os(reserved_oxide_symbols::ARTIFACT_ONLY_ENV).is_some(),
         }
     }
 
@@ -448,6 +456,10 @@ fn should_codegen_device_crate(
     contains_device_code: bool,
 ) -> bool {
     contains_device_code && config.allows_device_codegen_for(crate_name)
+}
+
+fn should_codegen_host_crate(artifact_only: bool, has_device_code: bool) -> bool {
+    !(artifact_only && has_device_code)
 }
 
 fn reject_unsupported_codegen_protocol(
@@ -777,9 +789,12 @@ impl CodegenBackend for CudaCodegenBackend {
                 None
             };
 
-            // Step 3: Delegate ALL host codegen to LLVM backend
-            // (No logging here - it fires for every crate including dependencies)
-            let host_result = self.llvm_backend.codegen_crate(tcx, crate_info);
+            // Artifact-extraction builds consume only the selected crate's
+            // `.oxart` archive member. Avoid compiling an unused host copy of
+            // that crate while preserving normal LLVM codegen for every
+            // dependency and every non-selected target.
+            let host_result = should_codegen_host_crate(self.config.artifact_only, has_device_code)
+                .then(|| self.llvm_backend.codegen_crate(tcx, crate_info));
 
             // Return the LLVM backend's result
             Box::new(CudaOngoingCodegen {
@@ -798,8 +813,16 @@ impl CodegenBackend for CudaCodegenBackend {
         let ongoing = *ongoing_codegen
             .downcast::<CudaOngoingCodegen>()
             .expect("rustc_codegen_cuda received unexpected ongoing codegen state");
-        let (mut compiled_modules, work_products) =
-            self.llvm_backend.join_codegen(ongoing.host, sess, outputs);
+        let (mut compiled_modules, work_products) = match ongoing.host {
+            Some(host) => self.llvm_backend.join_codegen(host, sess, outputs),
+            None => (
+                CompiledModules {
+                    modules: Vec::new(),
+                    allocator_module: None,
+                },
+                FxIndexMap::default(),
+            ),
+        };
         for (index, object) in ongoing.artifact_objects.into_iter().enumerate() {
             compiled_modules.modules.push(CompiledModule {
                 name: format!("oxide_artifact_embed_{index}"),
@@ -1195,6 +1218,14 @@ mod tests {
         let config = CudaCodegenConfig::default();
         assert!(config.allows_device_codegen_for("gpu_kernels"));
         assert!(config.allows_device_codegen_for("host_app"));
+    }
+
+    #[test]
+    fn artifact_only_skips_host_codegen_only_for_a_selected_device_owner() {
+        assert!(should_codegen_host_crate(false, true));
+        assert!(should_codegen_host_crate(false, false));
+        assert!(should_codegen_host_crate(true, false));
+        assert!(!should_codegen_host_crate(true, true));
     }
 
     #[test]

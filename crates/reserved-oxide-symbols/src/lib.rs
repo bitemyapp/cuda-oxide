@@ -74,6 +74,9 @@ pub const MATERIALIZER_HANDSHAKE_ENV: &str = "CUDA_OXIDE_INTERNAL_MATERIALIZER_H
 /// Optional comma-separated filter selecting crates that may own device code.
 pub const DEVICE_CODEGEN_CRATE_ENV: &str = "CUDA_OXIDE_DEVICE_CODEGEN_CRATE";
 
+/// Opt-in for artifact-extraction builds that omit the selected crate's host code.
+pub const ARTIFACT_ONLY_ENV: &str = "CUDA_OXIDE_ARTIFACT_ONLY";
+
 /// Reserved root that prefixes every cuda-oxide internal symbol.
 ///
 /// User code must not define functions whose name starts with this.
