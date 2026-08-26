@@ -14,12 +14,9 @@ mod kernels {
     include!("cuda_module_include_kernel_boundary_items.rs");
 }
 
-fn undiscovered(
-    module: &kernels::LoadedModule,
-    stream: &CudaStream,
-    config: LaunchConfig,
-) {
-    let _ = module.from_include(stream, config, 1u32);
+fn discovered(module: &kernels::LoadedModule, stream: &CudaStream, config: LaunchConfig) {
+    // SAFETY: this compile-pass fixture supplies the raw launch proof.
+    let _ = unsafe { module.from_include(stream, config, 1u32) };
 }
 
 fn main() {}

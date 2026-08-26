@@ -29,7 +29,7 @@
 //! so the same switch that turns host emission on also adds the `cuda-host`
 //! dependency that resolves it.
 
-#![feature(proc_macro_def_site, proc_macro_tracked_env)]
+#![feature(proc_macro_def_site, proc_macro_tracked_env, proc_macro_tracked_path)]
 
 mod device_copy;
 mod printf;
@@ -459,9 +459,11 @@ fn scope_parameter_collision(input: &ItemFn, scope: &Ident) -> Option<Ident> {
 /// The generated method name `as_cuda_module` is reserved in every kernel
 /// namespace, and `from_parent` is additionally reserved in nested namespaces.
 ///
-/// Procedural macros cannot see the contents of `mod child;` or `include!`.
-/// Those items are preserved, but kernels behind either boundary do not get
-/// generated launchers. Keep auto-launched nested kernels in inline modules.
+/// Procedural macros cannot see the contents of `mod child;`; those modules are
+/// preserved, but kernels behind that boundary do not get generated launchers.
+/// A literal `include!("relative/path.rs")` is expanded and traversed relative
+/// to the source file containing the invocation. Dynamic include expressions
+/// are preserved without traversal.
 ///
 /// Launcher methods are namespace-qualified, but PTX entry symbols are still
 /// bare function names. Kernel names must therefore be unique throughout one
@@ -1232,14 +1234,14 @@ struct CudaModuleLevel {
     direct_kernel_count: usize,
 }
 
-/// Recursively rewrite only inline child modules.
+/// Recursively rewrite inline child modules and literal `include!` inputs.
 ///
 /// Every module that owns a kernel (or contains a deeper module that does)
 /// receives its own `LoadedModule`. That keeps generated method signatures in
-/// the same Rust scope as the source kernel. File-backed modules and
-/// `include!` invocations are preserved but not traversed: their contents are
-/// not present in an attribute macro's input token stream, and reproducing
-/// rustc's module loader in a proc macro is neither complete nor hygienic.
+/// the same Rust scope as the source kernel. File-backed modules are preserved
+/// but not traversed. Literal `include!` inputs are different: their textual
+/// insertion semantics are complete enough to reproduce by parsing the named
+/// file in place, and the compiler is told to track that file as a dependency.
 fn transform_cuda_module_items(
     items: &[Item],
     module_path: &mut Vec<Ident>,
@@ -1290,6 +1292,29 @@ fn transform_cuda_module_items(
                 descendant_kernels.extend(nested.kernels);
                 transformed_items.push(Item::Mod(transformed_mod));
             }
+            Item::Macro(item_macro) => {
+                let Some(included_items) = read_cuda_module_include_items(item_macro)? else {
+                    transformed_items.push(item.clone());
+                    continue;
+                };
+
+                // `include!` inserts its items into the current namespace. Do
+                // the same here so kernels in the included file are direct
+                // kernels, while inline child modules retain their paths and
+                // receive the usual nested support.
+                let included = transform_cuda_module_items(
+                    &included_items,
+                    module_path,
+                    ancestor_cfg_attrs,
+                    false,
+                    emit_host,
+                )?;
+                let mut included_kernels = included.kernels;
+                let included_descendants = included_kernels.split_off(included.direct_kernel_count);
+                direct_kernels.extend(included_kernels);
+                descendant_kernels.extend(included_descendants);
+                transformed_items.extend(included.items);
+            }
             _ => transformed_items.push(item.clone()),
         }
     }
@@ -1312,6 +1337,74 @@ fn transform_cuda_module_items(
         kernels,
         direct_kernel_count,
     })
+}
+
+/// Parse a literal `include!("...")` as the textual items it contributes.
+///
+/// The source span gives the same base directory rustc uses. The manifest
+/// fallbacks keep expansion helpers usable in unit tests, where no procedural
+/// macro bridge (and therefore no source-file span) exists.
+fn read_cuda_module_include_items(item_macro: &syn::ItemMacro) -> syn::Result<Option<Vec<Item>>> {
+    if !item_macro.mac.path.is_ident("include") {
+        return Ok(None);
+    }
+    let Ok(relative) = item_macro.mac.parse_body::<syn::LitStr>() else {
+        return Ok(None);
+    };
+    let relative = std::path::PathBuf::from(relative.value());
+    let mut candidates = Vec::new();
+    if relative.is_absolute() {
+        candidates.push(relative.clone());
+    } else {
+        if proc_macro::is_available()
+            && let Some(source_file) = item_macro.span().unwrap().local_file()
+            && let Some(parent) = source_file.parent()
+        {
+            candidates.push(parent.join(&relative));
+        }
+        if let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR") {
+            let manifest_dir = std::path::PathBuf::from(manifest_dir);
+            candidates.push(manifest_dir.join("src").join(&relative));
+            candidates.push(manifest_dir.join("src/gpu").join(&relative));
+            candidates.push(manifest_dir.join(&relative));
+        }
+    }
+    let path = candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            syn::Error::new_spanned(
+                item_macro,
+                format!(
+                    "cuda_module could not resolve literal include `{}` relative to its source file",
+                    relative.display()
+                ),
+            )
+        })?;
+
+    if proc_macro::is_available() {
+        proc_macro::tracked::path(&path);
+    }
+    let source = std::fs::read_to_string(&path).map_err(|error| {
+        syn::Error::new_spanned(
+            item_macro,
+            format!(
+                "cuda_module failed to read include {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    syn::parse_file(&source)
+        .map(|file| Some(file.items))
+        .map_err(|error| {
+            syn::Error::new_spanned(
+                item_macro,
+                format!(
+                    "cuda_module failed to parse include {}: {error}",
+                    path.display()
+                ),
+            )
+        })
 }
 
 fn reject_reserved_loaded_module(items: &[Item]) -> syn::Result<()> {
@@ -9499,14 +9592,14 @@ mod tests {
     }
 
     #[test]
-    fn file_backed_modules_and_include_macros_are_preserved_without_being_walked() {
+    fn file_backed_modules_and_dynamic_include_macros_are_preserved_without_being_walked() {
         let module: ItemMod = parse_quote! {
             mod kernels {
                 #[kernel]
                 pub fn top() {}
 
                 mod helper;
-                include!("helper_items.rs");
+                include!(concat!(env!("OUT_DIR"), "/helper_items.rs"));
             }
         };
         let expanded = expand_to_compact_string(module);
@@ -9515,8 +9608,33 @@ mod tests {
             "file module was changed: {expanded}"
         );
         assert!(
-            expanded.contains("include!(\"helper_items.rs\");"),
+            expanded.contains("include!(concat!(env!(\"OUT_DIR\"),\"/helper_items.rs\"));"),
             "include invocation was changed: {expanded}"
+        );
+    }
+
+    #[test]
+    fn literal_include_macros_are_expanded_and_walked() {
+        let module: ItemMod = parse_quote! {
+            mod kernels {
+                #[kernel]
+                pub fn top() {}
+
+                include!("tests/pass/cuda_module_include_kernel_boundary_items.rs");
+            }
+        };
+        let expanded = expand_to_compact_string(module);
+        assert!(
+            expanded.contains("fnfrom_include"),
+            "included kernel body was not expanded: {expanded}"
+        );
+        assert!(
+            expanded.contains("pubunsafefnfrom_include("),
+            "included kernel launcher was not generated: {expanded}"
+        );
+        assert!(
+            !expanded.contains("include!("),
+            "literal include invocation survived expansion: {expanded}"
         );
     }
 

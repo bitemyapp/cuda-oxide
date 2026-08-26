@@ -10,6 +10,7 @@ fn macro_guards() {
     let t = trybuild::TestCases::new();
     t.pass("tests/pass/const_generic_hygiene.rs");
     t.pass("tests/pass/cuda_module_inline_namespaces.rs");
+    t.pass("tests/pass/cuda_module_include_kernel_boundary.rs");
     t.compile_fail("tests/compile_fail/kernel_reserved_name.rs");
     t.compile_fail("tests/compile_fail/device_reserved_name.rs");
     t.compile_fail("tests/compile_fail/device_extern_reserved_name.rs");
@@ -28,7 +29,6 @@ fn macro_guards() {
     t.compile_fail("tests/compile_fail/cuda_module_nested_type_mismatch.rs");
     t.compile_fail("tests/compile_fail/cuda_module_pub_super_scope.rs");
     t.compile_fail("tests/compile_fail/cuda_module_file_kernel_boundary.rs");
-    t.compile_fail("tests/compile_fail/cuda_module_include_kernel_boundary.rs");
 }
 
 /// Raw launch APIs leave their safety obligation at the call site. A bare
