@@ -159,6 +159,16 @@ mod kernels {
             *check_slot = check;
         }
     }
+
+    #[kernel]
+    pub fn uniform_u64_load_kernel(input: &[u64], mut out: DisjointSlice<u64>) {
+        // SAFETY: the slice base is valid, aligned, read-only, and identical
+        // in every lane because it is a kernel parameter.
+        let value = unsafe { cuda_device::uniform::load_u64(input.as_ptr()) };
+        if let Some((slot, _)) = out.get_mut_indexed() {
+            *slot = value;
+        }
+    }
 }
 
 fn main() {
@@ -307,6 +317,28 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    let uniform_value = 0xfedc_ba98_7654_3210u64;
+    let uniform_input = DeviceBuffer::from_host(&stream, &[uniform_value]).unwrap();
+    let mut uniform_out = DeviceBuffer::<u64>::zeroed(&stream, N).unwrap();
+
+    // SAFETY: every lane receives the same read-only input slice and writes a
+    // distinct in-bounds output element.
+    unsafe {
+        module.uniform_u64_load_kernel(
+            &stream,
+            LaunchConfig::for_num_elems(N as u32),
+            &uniform_input,
+            &mut uniform_out,
+        )
+    }
+    .expect("Uniform-load kernel launch failed");
+
+    let uniform_results = uniform_out.to_host_vec(&stream).unwrap();
+    assert!(
+        uniform_results.iter().all(|&value| value == uniform_value),
+        "ldu.global.u64 must return the shared input value in every lane"
+    );
 
     println!("SUCCESS: inline PTX results are correct");
 }

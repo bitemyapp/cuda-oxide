@@ -37,6 +37,34 @@
 //! [`crate::DisjointSlice::tile_2d32_rt`] reads it from there rather than
 //! taking it as an argument.
 
+use crate::ptx_asm;
+
+/// Loads one `u64` through PTX's warp-uniform global-memory path.
+///
+/// This emits `ldu.global.u64`. Unlike an ordinary global load, `ldu` is for
+/// addresses that are identical in every active lane of the warp.
+///
+/// # Safety
+///
+/// - `ptr` must be valid and naturally aligned for a `u64` global-memory load.
+/// - Every active lane that executes the instruction must pass the same
+///   address.
+/// - The pointed-to value must remain read-only for the duration of the
+///   kernel.
+#[inline(always)]
+pub unsafe fn load_u64(ptr: *const u64) -> u64 {
+    let value: u64;
+    unsafe {
+        ptx_asm!(
+            "ldu.global.u64 %0, [%1];",
+            out("=l") value,
+            in("l") ptr as u64,
+            clobber("memory"),
+        );
+    }
+    value
+}
+
 /// A scalar proven identical in every thread of the launch.
 ///
 /// The only safe source is a kernel parameter. `#[repr(transparent)]` makes the
