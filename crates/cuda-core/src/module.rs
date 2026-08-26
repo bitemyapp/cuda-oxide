@@ -457,6 +457,15 @@ impl CudaFunction {
         }
     }
 
+    fn set_attribute(
+        &self,
+        attribute: cuda_bindings::CUfunction_attribute,
+        value: i32,
+    ) -> Result<(), DriverError> {
+        self.context().bind_to_thread()?;
+        unsafe { cuda_bindings::cuFuncSetAttribute(self.cu_function, attribute, value) }.result()
+    }
+
     /// Returns the context that owns this function.
     pub fn context(&self) -> &Arc<CudaContext> {
         self.module.context()
@@ -538,6 +547,22 @@ impl CudaFunction {
         }
     }
 
+    /// Selects this function's preferred shared-memory/L1 cache carveout.
+    ///
+    /// `percent` is a hint in the inclusive range `0..=100`: `0` prefers L1,
+    /// while `100` prefers shared memory. The driver may choose a nearby
+    /// supported configuration rather than honoring the percentage exactly.
+    ///
+    /// Returns [`CUDA_ERROR_INVALID_VALUE`](cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_VALUE)
+    /// without calling the driver when `percent` is greater than 100.
+    pub fn set_preferred_shared_memory_carveout(&self, percent: u32) -> Result<(), DriverError> {
+        let percent = preferred_shared_memory_carveout_value(percent)?;
+        self.set_attribute(
+            cuda_bindings::CUfunction_attribute_enum_CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+            percent,
+        )
+    }
+
     /// Opts this function into a larger dynamic shared-memory allocation.
     ///
     /// Typed launch preparation calls this at most once, and only after
@@ -546,17 +571,12 @@ impl CudaFunction {
         &self,
         bytes: u32,
     ) -> Result<(), DriverError> {
-        self.context().bind_to_thread()?;
         let bytes = i32::try_from(bytes)
             .map_err(|_| DriverError(cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_VALUE))?;
-        unsafe {
-            cuda_bindings::cuFuncSetAttribute(
-                self.cu_function,
-                cuda_bindings::CUfunction_attribute_enum_CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                bytes,
-            )
-        }
-        .result()
+        self.set_attribute(
+            cuda_bindings::CUfunction_attribute_enum_CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            bytes,
+        )
     }
 
     /// Computes the maximum active blocks per streaming multiprocessor for a
@@ -694,5 +714,27 @@ impl CudaFunction {
     /// at least as long as the raw handle is used.
     pub unsafe fn cu_function(&self) -> cuda_bindings::CUfunction {
         self.cu_function
+    }
+}
+
+fn preferred_shared_memory_carveout_value(percent: u32) -> Result<i32, DriverError> {
+    if percent > 100 {
+        return Err(DriverError(
+            cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_VALUE,
+        ));
+    }
+    Ok(percent as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preferred_shared_memory_carveout_value;
+
+    #[test]
+    fn preferred_shared_memory_carveout_accepts_only_percentages() {
+        assert_eq!(preferred_shared_memory_carveout_value(0).unwrap(), 0);
+        assert_eq!(preferred_shared_memory_carveout_value(100).unwrap(), 100);
+        assert!(preferred_shared_memory_carveout_value(101).is_err());
+        assert!(preferred_shared_memory_carveout_value(u32::MAX).is_err());
     }
 }
