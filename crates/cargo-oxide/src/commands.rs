@@ -22,6 +22,7 @@ const MATERIALIZER_HANDSHAKE_ENV: &str = reserved_oxide_symbols::MATERIALIZER_HA
 const CODEGEN_FINGERPRINT_ENV: &str = reserved_oxide_symbols::CODEGEN_FINGERPRINT_ENV;
 const DEVICE_CODEGEN_CRATE_ENV: &str = reserved_oxide_symbols::DEVICE_CODEGEN_CRATE_ENV;
 const BACKEND_IDENTITY_CFG: &str = "cuda_oxide_internal_backend_identity";
+const DEVICE_CODEGEN_CFG: &str = "cuda_oxide_device_codegen";
 const LEGACY_CODEGEN_FINGERPRINT_CFG: &str = "cuda_oxide_internal_codegen_env";
 const LEGACY_MATERIALIZER_PROVENANCE_CFG: &str = "cuda_oxide_internal_materializer_provenance";
 const MATERIALIZER_HANDSHAKE_CACHE: &str = ".oxide-artifacts/materializer-handshake/v1.json";
@@ -6050,8 +6051,9 @@ fn apply_codegen_configuration(
     codegen_fingerprint: &str,
 ) -> Result<(), String> {
     let backend_digest = backend_artifact_digest(&ctx.backend_so)?;
-    let mut global_cfgs = Vec::with_capacity(user_device_cfgs.len() + 1);
+    let mut global_cfgs = Vec::with_capacity(user_device_cfgs.len() + 2);
     global_cfgs.push(format!("{BACKEND_IDENTITY_CFG}=\"{backend_digest}\""));
+    global_cfgs.push(DEVICE_CODEGEN_CFG.to_string());
     global_cfgs.extend(user_device_cfgs.iter().cloned());
 
     apply_codegen_rustflags(cmd, ctx, profile, &global_cfgs);
@@ -8148,7 +8150,13 @@ path = "src/other.rs"
         )
         .unwrap();
         let encoded = command_env(&cmd, "CARGO_ENCODED_RUSTFLAGS").unwrap();
-        assert!(has_backend_identity_cfg(&decoded_rustflags(&encoded)));
+        let flags = decoded_rustflags(&encoded);
+        assert!(has_backend_identity_cfg(&flags));
+        assert!(
+            flags
+                .windows(2)
+                .any(|pair| pair == ["--cfg", DEVICE_CODEGEN_CFG])
+        );
         assert_eq!(
             command_env(&cmd, CODEGEN_FINGERPRINT_ENV).as_deref(),
             Some(fingerprint.as_str())

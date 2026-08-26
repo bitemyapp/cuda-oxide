@@ -1220,6 +1220,7 @@ fn expand_cuda_module_inner(module: ItemMod, emit_host: bool) -> syn::Result<Tok
 
     Ok(quote! {
         #(#module_attrs)*
+        #[allow(unexpected_cfgs)]
         #vis mod #ident {
             #(#module_items)*
             #(#ptx_merge_required_markers)*
@@ -1260,7 +1261,36 @@ fn transform_cuda_module_items(
                 {
                     direct_kernels.push(kernel);
                 }
-                transformed_items.push(item.clone());
+                if emit_host && item_fn.sig.constness.is_none() {
+                    // The custom backend needs the original device body, but the ordinary host
+                    // build needs only its signature and generated launch surface. Optimizing
+                    // large generated kernels for an executable that can never call their Rust
+                    // bodies can otherwise dominate release build time.
+                    let mut device_fn = item_fn.clone();
+                    device_fn
+                        .attrs
+                        .insert(0, parse_quote!(#[allow(unexpected_cfgs)]));
+                    device_fn
+                        .attrs
+                        .insert(0, parse_quote!(#[cfg(cuda_oxide_device_codegen)]));
+                    transformed_items.push(Item::Fn(device_fn));
+
+                    let mut host_stub = item_fn.clone();
+                    host_stub.block = Box::new(parse_quote!({
+                        unreachable!("cuda-oxide device function executed by host")
+                    }));
+                    host_stub
+                        .attrs
+                        .insert(0, parse_quote!(#[allow(unexpected_cfgs, unused)]));
+                    host_stub
+                        .attrs
+                        .insert(0, parse_quote!(#[cfg(not(cuda_oxide_device_codegen))]));
+                    transformed_items.push(Item::Fn(host_stub));
+                } else {
+                    // Const bodies must remain host-visible because surrounding constants may
+                    // evaluate them. A device-only macro build also retains its source verbatim.
+                    transformed_items.push(item.clone());
+                }
             }
             Item::Mod(item_mod) => {
                 let Some((_brace, nested_items)) = &item_mod.content else {
@@ -8148,6 +8178,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn host_cuda_module_strips_runtime_bodies_but_keeps_const_evaluation() {
+        let module: ItemMod = parse_quote! {
+            mod kernels {
+                fn expensive_helper(input: u64) -> u64 { input.wrapping_mul(7) }
+                const fn table_size() -> usize { 384 }
+                const TABLE_SIZE: usize = table_size();
+
+                #[kernel]
+                fn scale(out: *mut f32) { let _ = expensive_helper(11); }
+            }
+        };
+        let expanded = expand_to_compact_string(module);
+        assert!(expanded.contains("cfg(cuda_oxide_device_codegen)"));
+        assert!(expanded.contains("cfg(not(cuda_oxide_device_codegen))"));
+        assert!(expanded.contains("cuda-oxidedevicefunctionexecutedbyhost"));
+        assert!(expanded.contains("constfntable_size()->usize{384}"));
+        assert!(expanded.contains("constTABLE_SIZE:usize=table_size();"));
+    }
+
     /// A nested inline module gets its own `LoadedModule`, so it needs the
     /// same gate as the outer one.
     #[test]
@@ -8544,12 +8594,14 @@ mod tests {
         };
         let expanded = expand_to_compact_string(module);
         assert!(
-            expanded.contains("pubmodstage1{#[kernel]pubfnscale")
+            expanded.contains("pubmodstage1{")
+                && expanded.contains("#[kernel]pubfnscale")
                 && expanded.contains("<__scale_CudaKernelas::cuda_host::CudaKernel>"),
             "expected the stage1 launcher to resolve its marker locally:\n{expanded}"
         );
         assert!(
-            expanded.contains("pubmodinner{#[kernel]pubfnshift")
+            expanded.contains("pubmodinner{")
+                && expanded.contains("#[kernel]pubfnshift")
                 && expanded.contains("<__shift_CudaKernelas::cuda_host::CudaKernel>"),
             "expected the doubly nested launcher to resolve its marker locally:\n{expanded}"
         );
@@ -9635,6 +9687,10 @@ mod tests {
         assert!(
             !expanded.contains("include!("),
             "literal include invocation survived expansion: {expanded}"
+        );
+        assert!(
+            expanded.contains("cuda-oxidedevicefunctionexecutedbyhost"),
+            "included runtime body was not replaced by a host stub: {expanded}"
         );
     }
 
