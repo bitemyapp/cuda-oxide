@@ -800,6 +800,13 @@ fn legacy_function_address_defined_later_round_trips_through_indirect_call() {
         "indirect call must restore the exact function pointer type:\n{ir}"
     );
     assert!(ir.contains("call void %"), "{ir}");
+    assert!(
+        ir.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("call void %") && line.ends_with(") #0")
+        }),
+        "an indirect call must retain an explicit convergent attribute:\n{ir}"
+    );
 }
 
 #[test]
@@ -2338,6 +2345,115 @@ fn export_alwaysinline_function_attribute_uses_llvm_define_syntax() {
     assert!(
         ir.contains("attributes #0 = { convergent }"),
         "convergent attribute group must still be emitted:\n{ir}"
+    );
+}
+
+#[test]
+fn direct_calls_inherit_convergent_attribute_from_their_callee() {
+    let mut ctx = Context::new();
+    let module = ModuleOp::new(&mut ctx, "test_module".try_into().unwrap());
+    let module_block = module_top_block(&mut ctx, &module);
+
+    let void_ty = VoidType::get(&ctx);
+    let func_ty = FuncType::get(&ctx, void_ty.to_handle(), vec![], false);
+
+    let barrier = FuncOp::new(&mut ctx, "llvm_nvvm_barrier0".try_into().unwrap(), func_ty);
+    barrier.get_operation().insert_at_back(module_block, &ctx);
+
+    let pure = FuncOp::new(&mut ctx, "pure_helper".try_into().unwrap(), func_ty);
+    let pure_entry = pure.get_or_create_entry_block(&mut ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(pure_entry, &ctx);
+    pure.get_operation().insert_at_back(module_block, &ctx);
+
+    let caller = FuncOp::new(&mut ctx, "caller".try_into().unwrap(), func_ty);
+    let caller_entry = caller.get_or_create_entry_block(&mut ctx);
+    CallOp::new(
+        &mut ctx,
+        CallOpCallable::Direct("llvm_nvvm_barrier0".try_into().unwrap()),
+        func_ty,
+        vec![],
+    )
+    .get_operation()
+    .insert_at_back(caller_entry, &ctx);
+    CallOp::new(
+        &mut ctx,
+        CallOpCallable::Direct("pure_helper".try_into().unwrap()),
+        func_ty,
+        vec![],
+    )
+    .get_operation()
+    .insert_at_back(caller_entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(caller_entry, &ctx);
+    caller.get_operation().insert_at_back(module_block, &ctx);
+
+    let ir = export_module_to_string(&ctx, &module).expect("export succeeds");
+
+    assert!(
+        ir.contains("declare void @llvm.nvvm.barrier0() #0"),
+        "a known convergent intrinsic must carry its declaration attribute:\n{ir}"
+    );
+    assert!(
+        ir.contains("call void @llvm.nvvm.barrier0()\n"),
+        "a direct intrinsic call must not repeat its callee's convergent attribute:\n{ir}"
+    );
+    assert!(
+        ir.contains("call void @pure_helper()\n"),
+        "an ordinary direct helper call must not get a redundant attribute:\n{ir}"
+    );
+}
+
+#[test]
+fn convergent_device_extern_keeps_an_explicit_call_site_attribute() {
+    let mut ctx = Context::new();
+    let module = ModuleOp::new(&mut ctx, "test_module".try_into().unwrap());
+    let module_block = module_top_block(&mut ctx, &module);
+
+    let void_ty = VoidType::get(&ctx);
+    let func_ty = FuncType::get(&ctx, void_ty.to_handle(), vec![], false);
+    FuncOp::new(&mut ctx, "collective_external".try_into().unwrap(), func_ty)
+        .get_operation()
+        .insert_at_back(module_block, &ctx);
+
+    let caller = FuncOp::new(&mut ctx, "caller".try_into().unwrap(), func_ty);
+    let entry = caller.get_or_create_entry_block(&mut ctx);
+    CallOp::new(
+        &mut ctx,
+        CallOpCallable::Direct("collective_external".try_into().unwrap()),
+        func_ty,
+        vec![],
+    )
+    .get_operation()
+    .insert_at_back(entry, &ctx);
+    ReturnOp::new(&mut ctx, None)
+        .get_operation()
+        .insert_at_back(entry, &ctx);
+    caller.get_operation().insert_at_back(module_block, &ctx);
+
+    let externs = [DeviceExternDecl {
+        export_name: "collective_external".to_string(),
+        param_types: vec![],
+        return_type: DeviceExternType::Void,
+        attrs: DeviceExternAttrs {
+            is_convergent: true,
+            ..DeviceExternAttrs::default()
+        },
+    }];
+    let ir = export_module_with_externs(
+        &ctx,
+        &module,
+        &externs,
+        &NvvmExportConfig::new(NvvmIrDialect::Modern),
+    )
+    .expect("export succeeds");
+
+    assert!(ir.contains("define void @caller() #0 {"), "{ir}");
+    assert!(
+        ir.contains("call void @collective_external() #0"),
+        "a convergent side-table extern needs a call-site attribute because its declaration is emitted without attrs:\n{ir}"
     );
 }
 
